@@ -23,8 +23,8 @@ copying.
 | 6 | shner-elmo/TradingView-Screener | MIT | Reference — superseded for India by #1 |
 | 7 | atilaahmettaner/tradingview-mcp | MIT | Reference — separate MCP server |
 | 8 | tradesdontlie/tradingview-mcp | MIT | Reference — needs TradingView Desktop |
-| 9 | PyneSys/pynecore | Apache-2.0 | Reference — overlapping engine |
-| 10 | theonetrade/pynecore-strategies | MIT | Reference — strategy/indicator corpus |
+| 9 | PyneSys/pynecore | Apache-2.0 | **Used in tests** — Pine-semantics reference |
+| 10 | theonetrade/pynecore-strategies | MIT | **Used in tests** — via #9's `ta` built-ins |
 | 11 | klinecharts/KLineChart | Apache-2.0 | Reference — second charting library |
 | 12 | kadoa-org/congress-trading-monitor | MIT | Reference — US-only alt data |
 | 13 | visualHFT/VisualHFT | Apache-2.0 | Reference — needs order-book data |
@@ -223,10 +223,19 @@ impressive verification: 1,000 published TradingView scripts, 99.771% of 132
 million plotted values bit-identical to TradingView, 353,577 strategy trades
 matching its timing.
 
-**Not integrated** because it is a complete backtesting engine, and tvlab is one
-too. Adopting it would mean either two engines with two sets of fill, cost and
-sizing semantics — the kind of duplication that already caused a real bug here —
-or rebuilding tvlab's validation stack on top of it.
+**Not integrated as an engine.** It is a complete backtesting engine and tvlab is
+one too; adopting it would mean two engines with two sets of fill, cost and sizing
+semantics — the kind of duplication that already caused a real bug here — or
+rebuilding tvlab's validation stack on top of it.
+
+**Used as a reference oracle in the test suite.** Its `ta` module implements
+TradingView's Pine built-ins, which makes it the only available authority on what
+`ta.atr` or `ta.rsi` actually mean. `scripts/vendor_xval_indicator.py` plots those
+built-ins over bars this repo generates, and `tests/test_pynecore_reference.py`
+compares them against `indicators/technical.py`. Install with
+`pip install -r requirements-optional.txt`; the tests skip without it.
+
+What that comparison found is recorded in section 10.
 
 **Genuinely worth reading** for two things tvlab does not have: its `na`
 propagation semantics, and how it keeps variables persistent across bars without
@@ -239,13 +248,53 @@ the right way to run them; convert with PyneComp and compare its trades against
 449 strategies, 471 indicators and 85 libraries compiled from Pine Script to
 PyneCore, runnable with no TradingView account, browser or chart.
 
-**Not integrated** — it requires #9 as its runtime.
+**Not integrated as a corpus** — it requires #9 as its runtime, and the 471
+compiled indicators are third-party scripts with their own input defaults,
+smoothing and plotting choices. A disagreement with one of them could come from
+the author's parameters rather than from a real difference in the underlying
+formula, which makes them a poor oracle.
 
-**Best remaining use:** an independent corpus for cross-validating
-`indicators/technical.py`. This repo already does exactly that with #3 for SMC
-features and got a 94.4%/100% match rate out of it; 471 Pine-compiled indicators
-would be a much broader check on ATR, RSI, ADX, Bollinger and the rest. That is a
-real, unstarted piece of work, not a nice-to-have.
+**Used instead through #9's `ta` built-ins**, which is the same Pine semantics
+without the third-party parameters in the way. That closes what was previously
+listed here as the best remaining use. 26 tests in
+`tests/test_pynecore_reference.py`, run over 600 bars.
+
+Results, all asserted rather than merely noted:
+
+| Indicator | Against | Result |
+|:----------|:--------|:-------|
+| `sma`, `bollinger`, `stdev` | `ta.sma`, `ta.bb`, `ta.stdev` | **exact from bar 0** (~1e-14) |
+| `atr(method="wilder")` | `ta.atr(14)` | converges to ~1e-15 |
+| `rsi` | `ta.rsi(close,14)` | converges to ~1e-15 |
+| `ema`, `rma` | `ta.ema`, `ta.rma` | converge to ~1e-15 |
+| `macd` (all 3 outputs) | `ta.macd` | converge to ~1e-13 |
+| `supertrend` band | `ta.supertrend(3,10)[0]` | converges to ~1e-16 |
+| `donchian` | `ta.highest`/`ta.lowest` | differs by exactly one bar, deliberately |
+
+Three findings worth keeping:
+
+1. **`bollinger`'s `ddof=0` is correct and now proven.** Pine's `ta.stdev`
+   defaults to `biased=True`, i.e. population std. pandas' `.rolling().std()`
+   defaults to `ddof=1`. Had that been left at the pandas default the bands would
+   have been quietly too wide by `sqrt(n/(n-1))` — 1.3% at n=20, enough to move a
+   band-cross signal without looking like a bug.
+
+2. **Recursive indicators disagree during warmup, and by how much is modelled.**
+   Pine seeds from bar zero; pandas recurses from bar zero but publishes NaN until
+   `min_periods`. RSI differs by up to 27% relative in the first hundred bars and
+   is indistinguishable after ~260. `bars_to_forget_seed()` in the test derives
+   that number from `(1 - 1/period)**k` instead of hardcoding it. Consequence for
+   anyone comparing indicators: a whole-series comparison of a recursive indicator
+   fails for a reason that has nothing to do with the formula.
+
+3. **`st_direction` is the exact negation of Pine's `direction`.** tvlab uses
+   `+1 = uptrend`; TradingView's own built-in plots `direction < 0` as "Up
+   Direction", so Pine uses `+1 = downtrend`. The band matches to machine
+   precision — only the flag is flipped. Nothing in `src/` reads `st_direction`
+   today, so this is a porting trap rather than a live bug, but 449 Pine
+   strategies sit in this directory as reference material and copying one across
+   would silently invert every entry. Documented in the `supertrend()` docstring
+   where a porter would see it.
 
 ### 11. `klinecharts/KLineChart` (Apache-2.0)
 
@@ -337,15 +386,30 @@ licence means all rights reserved, not public domain. Educational reference only
 | `tvlab scan --trendlines`, `GET /api/scan?trendlines=1` | `src/tvlab/screener/scanner.py`, `cli.py`, `dashboard/app.py` |
 | pytrendline rejection rationale | `requirements-optional.txt` |
 | `tradesdontlie/tradingview-mcp` licence corrected | `vendor/LOCK.json` |
+| Pine-semantics cross-validation of every TA indicator | `scripts/vendor_xval_indicator.py` (new), `tests/test_pynecore_reference.py` (new) |
+| `supertrend` direction sign trap documented at the source | `src/tvlab/indicators/technical.py` |
+| `pynesys-pynecore[cli]` as an optional test dependency | `requirements-optional.txt` |
 | 73 new tests | `tests/test_nse_source.py`, `tests/test_cli_nse.py`, `tests/test_trendlines.py` |
+| 26 more tests | `tests/test_pynecore_reference.py` |
 
 **Still open, in rough order of value:**
 
-1. Cross-validate `indicators/technical.py` against the 471 Pine-compiled
-   indicators in #10. This repo already proved the approach works on SMC features.
+1. ~~Cross-validate `indicators/technical.py` against the 471 Pine-compiled
+   indicators in #10.~~ **Closed** — done through #9's `ta` built-ins rather than
+   the compiled scripts, for the reason given in section 10. Results table and the
+   three findings are in that section; the tests are
+   `tests/test_pynecore_reference.py` (26) driven by
+   `scripts/vendor_xval_indicator.py`.
 2. Verify the NSE and Yahoo payload shapes against the live APIs. They are
-   reconstructed, not captured.
-3. `screener/scanner.py` still carries its own `DEFAULT_CORR_THRESHOLD = 0.70`
-   and does not read `risk.correlation_threshold`, so the scanner and the
-   allocator disagree about what counts as correlated. Worst on forex, where the
-   configured threshold is 0.40.
+   reconstructed, not captured. This one cannot be closed from a sandbox with no
+   route to NSE or Yahoo — it needs a networked machine.
+3. ~~`screener/scanner.py` still carries its own `DEFAULT_CORR_THRESHOLD = 0.70`.~~
+   **Closed, and this note was wrong when written.** `grep -n "corr" scanner.py`
+   returns nothing: the scanner never grouped positions, so there was no second
+   threshold to disagree with. Correlation lives only in
+   `portfolio/allocate.py`, which reads `risk.correlation_threshold` from config
+   (`DEFAULT_CORR_THRESHOLD = 0.60` is the fallback, not the value in force), and
+   `pipeline.py` passes `corr_threshold=None` to mean "use the config". Covered by
+   `test_correlation_threshold_is_per_market` and
+   `test_correlation_threshold_controls_grouping`. Worth recording because a
+   plausible-sounding note in a hand-written audit is not evidence.

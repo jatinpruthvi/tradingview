@@ -35,6 +35,11 @@ def atr(df: pd.DataFrame, period: int = 14, method: str = "wilder") -> pd.Series
 
     ``wilder`` (default) matches TradingView's ``ta.atr`` - an RMA, i.e. an EMA
     with alpha = 1/period. ``ema`` and ``sma`` are also available.
+
+    That claim is verified, not assumed: ``tests/test_pynecore_reference.py``
+    compares this against PyneCore's ``ta.atr(14)`` over 600 bars and agrees to
+    ~1e-15 relative error in steady state. The first ~260 bars differ because the
+    two seed the recursion differently; see that file for the decay model.
     """
     tr = true_range(df)
     if method == "wilder":
@@ -121,6 +126,18 @@ def supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> p
     NaN seed poisons the band for the entire series and the direction never
     flips. We therefore start the recursion at the first bar with a finite ATR
     and emit NaN before it.
+
+    Note the argument order is the reverse of Pine's ``ta.supertrend(factor,
+    atrPeriod)`` - this is ``(period, multiplier)``.
+
+    **``st_direction`` has the opposite sign to Pine's ``direction``.** Here
+    ``+1`` means uptrend (the plotted band is ``st_lower``, support under price).
+    TradingView's built-in plots ``direction < 0`` as "Up Direction", so Pine uses
+    ``+1`` for *down*trend. The band itself matches Pine to machine precision;
+    only the flag is negated. Verified against PyneCore's ``ta.supertrend`` in
+    ``tests/test_pynecore_reference.py`` - it is the exact negation on every
+    settled bar. Porting a Pine strategy that branches on ``direction`` without
+    flipping the sign inverts every entry and exit.
     """
     hl2 = (df["high"] + df["low"]) / 2.0
     a = atr(df, period)

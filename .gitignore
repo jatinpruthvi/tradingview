@@ -37,3 +37,11 @@ secrets.yaml
 .vscode/
 .eggs/
 /tmp/
+
+# --- PyneCore cross-validation artifacts ---
+# `pyne` creates a working directory and the reference runner writes its plot CSV
+# and generated syminfo next to the script. Only the script itself is source.
+workdir/
+scripts/vendor_xval_indicator.csv
+scripts/vendor_xval_indicator.toml
+*.ohlcv

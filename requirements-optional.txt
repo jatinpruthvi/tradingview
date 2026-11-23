@@ -46,3 +46,14 @@ yfinance>=0.2.40
 # The capability is implemented natively in tvlab/indicators/trendlines.py on top
 # of this repo's already-validated causal pivot detector: same job, 12 ms on 600
 # bars. See VENDOR.md.
+
+# Reference implementation of TradingView's Pine Script TA built-ins, used only by
+# tests/test_pynecore_reference.py to cross-validate src/tvlab/indicators/technical.py.
+# Nothing in src/ imports it - tvlab never depends on it at runtime.
+#
+# The `pyne` console script is needed too, for the CSV -> OHLCV conversion the
+# reference runner performs, hence the [cli] extra. The package on PyPI as
+# `pynecore` is only a stub that installs this one.
+#
+# Without it those tests skip rather than fail.
+pynesys-pynecore[cli]>=0.1
