@@ -317,3 +317,76 @@ def test_structural_stop_is_surfaced_as_a_reason(runner, patch_scan):
     out = runner.invoke(cli, ["suggest", "--market", "crypto", "--style", "swing",
                               "--trendlines"]).output
     assert "structural" in out.lower()
+
+
+# ------------------------------------------- data failure vs. a quiet market
+
+
+def test_suggest_reports_a_total_data_failure_as_a_failure_not_a_verdict(runner, patch_scan):
+    """The central distinction. "Nothing qualifies" is a claim about the market and
+    is only licensed if the market was observed. With every symbol failing to load
+    there is no observation, and the reassuring phrasing would turn a network
+    outage into a quiet-market verdict - the same shape as an empty frame reading
+    as "no trades today"."""
+    patch_scan([], errors={"RELIANCE.NS": "DataError: could not reach Yahoo",
+                           "TCS.NS": "DataError: could not reach Yahoo"})
+    res = runner.invoke(cli, ["suggest", "--market", "indian_equities", "--style", "swing"])
+    assert res.exit_code == 2, res.output
+    out = _flat(res.output)
+    assert "data failure, not a market verdict" in out
+    assert "Nothing qualifies" not in out, "must not claim a market verdict it did not earn"
+    assert "normal state" not in out
+
+
+def test_suggest_data_failure_lists_the_errors_and_a_retry(runner, patch_scan):
+    patch_scan([], errors={f"S{i}.NS": "DataError: unreachable" for i in range(9)})
+    out = _flat(runner.invoke(cli, ["suggest", "--market", "indian_equities",
+                                    "--style", "swing"]).output)
+    assert "All 9 symbol(s) failed to load" in out
+    assert "... and 4 more" in out, "should truncate rather than dump every error"
+    assert "tvlab data --market indian_equities" in out, "must give a concrete next step"
+    assert "None" not in out.split("tvlab data")[1][:80], "unresolved flag leaked into the retry"
+
+
+def test_suggest_partial_failure_still_gives_a_market_verdict(runner, patch_scan):
+    """Over-warning is its own failure mode: if two of ten symbols loaded and none
+    fired, that IS a legitimate (if partial) market observation and must not exit
+    non-zero."""
+    patch_scan([_row("QUIET", signal=0)], errors={"DEAD.NS": "DataError: unreachable"})
+    res = runner.invoke(cli, ["suggest", "--market", "indian_equities", "--style", "swing"])
+    assert res.exit_code == 0, res.output
+    assert "Nothing qualifies" in _flat(res.output)
+
+
+def test_scan_reports_a_total_data_failure_as_a_failure(runner, monkeypatch):
+    """`scan` had the identical bug: every symbol failed to load and it still
+    printed "That is the normal state - this setup should not fire often." """
+    def fake(store, cfg, symbols, **kwargs):
+        return [], {s: "DataError: could not reach query1.finance.yahoo.com" for s in symbols}
+
+    monkeypatch.setattr("tvlab.cli.scan_universe", fake, raising=False)
+    monkeypatch.setattr("tvlab.screener.scan_universe", fake, raising=False)
+    monkeypatch.setattr("tvlab.screener.scanner.scan_universe", fake, raising=False)
+    res = runner.invoke(cli, ["scan", "--market", "crypto", "--style", "swing"])
+    assert res.exit_code == 2, res.output
+    out = _flat(res.output)
+    assert "data failure, not a market verdict" in out
+    assert "normal state" not in out
+
+
+def test_scan_partial_failure_qualifies_its_verdict_with_coverage(runner, monkeypatch):
+    """A partial view must not present itself as a complete one. The verdict is
+    still allowed, but it has to say how much of the universe it actually saw."""
+    def fake(store, cfg, symbols, **kwargs):
+        rows = [ScanRow(symbol=symbols[0], signal=0, bars=500)] if symbols else []
+        return rows, {s: "DataError: unreachable" for s in symbols[1:]}
+
+    monkeypatch.setattr("tvlab.cli.scan_universe", fake, raising=False)
+    monkeypatch.setattr("tvlab.screener.scan_universe", fake, raising=False)
+    monkeypatch.setattr("tvlab.screener.scanner.scan_universe", fake, raising=False)
+    res = runner.invoke(cli, ["scan", "--market", "crypto", "--style", "swing",
+                              "--symbols", "BTC/USDT,DEAD/COIN"])
+    assert res.exit_code == 0, res.output
+    out = _flat(res.output)
+    assert "normal state" in out
+    assert "based on 1 of 2 symbols" in out, "must state the coverage it actually had"

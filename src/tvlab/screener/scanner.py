@@ -299,6 +299,18 @@ def rank(rows: Sequence[ScanRow], live_only: bool = True,
     return [r for r in ordered if r.signal != 0] if live_only else ordered
 
 
+def _median_atr(rows: Sequence[ScanRow]) -> float:
+    """Median ATR% across scanned rows, or NaN if none reported one.
+
+    ``np.nanmedian`` on an all-NaN slice raises ``RuntimeWarning: All-NaN slice
+    encountered`` and returns NaN anyway. That warning prints straight into the
+    user's terminal, which is exactly where a partial data failure already looks
+    confusing, so filter first and skip the call when nothing is left.
+    """
+    vals = [r.atr_pct for r in rows if r.atr_pct is not None and np.isfinite(r.atr_pct)]
+    return float(np.median(vals)) if vals else float("nan")
+
+
 def summarize(rows: Sequence[ScanRow], errors: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Counts for a one-line status read-out."""
     live = [r for r in rows if r.is_live]
@@ -311,7 +323,7 @@ def summarize(rows: Sequence[ScanRow], errors: Optional[Dict[str, str]] = None) 
         "uptrend": sum(1 for r in rows if r.trend == 1),
         "downtrend": sum(1 for r in rows if r.trend == -1),
         "in_zone": sum(1 for r in rows if r.zones != "-"),
-        "median_atr_pct": float(np.nanmedian([r.atr_pct for r in rows])) if rows else float("nan"),
+        "median_atr_pct": _median_atr(rows),
     }
     if errors:
         out["errors"] = dict(errors)

@@ -284,9 +284,33 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
                       "`tvlab study` so the breakeven thresholds have something to be "
                       "compared against[/yellow]")
 
+    why = summarize(rows, errors)
+
+    # "Nothing qualifies" is a statement about the market. It is only true if the
+    # market was actually observed. When every symbol failed to load, scanned is 0
+    # and the honest answer is "we could not look", not "we looked and found
+    # nothing" - the second reads as a legitimate quiet market and sends someone
+    # away believing a data outage was a trading signal.
+    if why["scanned"] == 0 and errors:
+        console.print("\n[bold red]Nothing was scanned - this is a data failure, not a "
+                      "market verdict.[/bold red]")
+        console.print(f"  All {len(errors)} symbol(s) failed to load. First few:")
+        for sym, err in list(errors.items())[:5]:
+            console.print(f"    [red]{sym:<14}[/red] [dim]{err}[/dim]")
+        if len(errors) > 5:
+            console.print(f"    [dim]... and {len(errors) - 5} more[/dim]")
+        console.print("\n  [yellow]No suggestion is possible until bars load. Check the "
+                      "data source and network route, then retry:[/yellow]")
+        src_flag = f"--data-source {data_source} " if data_source else ""
+        console.print(f"    [dim]tvlab data --market {cfg.universe.market} "
+                      f"--style {cfg.style or style or 'default'} {src_flag}--limit 50[/dim]")
+        console.print("  [dim]For Indian equities the NSE route needs no key but does need "
+                      "query1.finance.yahoo.com reachable for history; `tvlab nse session` "
+                      "and `tvlab nse breadth` test the NSE endpoints on their own.[/dim]")
+        raise SystemExit(2)
+
     if not res["candidates"]:
         console.print("\n[bold yellow]Nothing qualifies.[/bold yellow]")
-        why = summarize(rows, errors)
         console.print(f"  {why['live']} live signal(s) of {why['scanned']} scanned; "
                       f"{res['n_rejected']} rejected by the cost/breakeven gate.")
         for rej in res["rejected"][:top]:
@@ -458,9 +482,24 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
         side = "LONG " if r.signal > 0 else "SHORT"
         rr = f"  R:R {r.reward_risk:.2f}" if r.reward_risk is not None else ""
         console.print(f"  {side} {r.symbol}{rr}")
+    if s["scanned"] == 0 and s["failed"]:
+        # Same trap as `suggest`: "nothing fired" is a claim about the market, and
+        # it is only licensed if the market was observed. With every symbol failing
+        # there is no observation to report, and the reassuring line below would
+        # turn a data outage into a quiet-market verdict.
+        console.print("[bold red]  Nothing was scanned - this is a data failure, not a "
+                      "market verdict.[/bold red]")
+        console.print(f"[red]  All {s['failed']} symbol(s) failed to load; see the FAILED "
+                      f"rows above.[/red]")
+        console.print(f"  [yellow]Retry once bars load:[/yellow] [dim]tvlab data "
+                      f"--market {cfg.universe.market} --data-source {cfg.data.source} "
+                      f"--limit 50[/dim]")
+        raise SystemExit(2)
     if not s["live"]:
         console.print("  No symbol satisfies bias + sweep + confirmation right now. "
-                      "That is the normal state - this setup should not fire often.")
+                      "That is the normal state - this setup should not fire often."
+                      + (f" (based on {s['scanned']} of {s['scanned'] + s['failed']} "
+                         f"symbols - the rest failed to load)" if s["failed"] else ""))
     if s["failed"]:
         console.print(f"[yellow]  {s['failed']} symbol(s) could not be scanned; "
                       f"see the FAILED rows above.[/yellow]")

@@ -454,3 +454,29 @@ def test_a_trendline_fit_failure_cannot_lose_the_rest_of_the_row(store, cfg, mon
     assert row.symbol == "BTC/USDT"
     assert row.support_pct is None
     assert any("trendline error" in w for w in row.warnings), row.warnings
+
+
+def test_summarize_median_atr_does_not_warn_on_all_nan():
+    """np.nanmedian raises RuntimeWarning: All-NaN slice on an all-NaN input, and
+    that warning prints into the user's terminal - which is exactly where a partial
+    data failure already looks confusing. Filter first, skip the call when empty."""
+    import warnings
+    rows = [ScanRow(symbol="A", signal=0), ScanRow(symbol="B", signal=0)]   # no atr_pct
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")            # a warning becomes a failure
+        s = summarize(rows)
+    assert s["scanned"] == 2
+    assert s["median_atr_pct"] != s["median_atr_pct"], "expected NaN"
+
+
+def test_summarize_median_atr_uses_the_finite_values():
+    rows = [ScanRow(symbol="A", signal=0, atr_pct=1.0),
+            ScanRow(symbol="B", signal=0, atr_pct=3.0),
+            ScanRow(symbol="C", signal=0)]                     # None must be ignored
+    assert summarize(rows)["median_atr_pct"] == 2.0
+
+
+def test_summarize_on_no_rows_at_all():
+    s = summarize([])
+    assert s["scanned"] == 0 and s["live"] == 0
+    assert s["median_atr_pct"] != s["median_atr_pct"]
