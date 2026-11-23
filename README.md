@@ -13,20 +13,33 @@ be.**
 
 Running the full study today:
 
+```bash
+tvlab study --market crypto --style swing --recovery --xval \
+            --set data.synthetic_bars=2500
 ```
-VERDICT: NOT VALIDATED                          4 of 8 checks passed
+
+```
+VERDICT: NOT VALIDATED                          3 of 8 checks passed
 
  1  Enough trades to measure            FAIL    13 trades - below 30 every ratio is noise
- 2  Deflated Sharpe (multiple testing)  FAIL    DSR=0.009 over 64 trials
+ 2  Deflated Sharpe (multiple testing)  FAIL    DSR=0.002 over 320 trials
  3  Drawdown within mandate             PASS    max DD 0.37% vs limit 10.0%
  4  Profit factor > 1 after costs       PASS    PF=1.09
- 5  Walk-forward windows profitable     FAIL    1/4 OOS windows profitable
- 6  OOS retains IS performance          FAIL    mean OOS/IS ratio = -0.27
+ 5  Walk-forward windows profitable     FAIL    1/5 OOS windows profitable (20%)
+ 6  OOS retains IS performance          n/a     not measurable - see below
  7  Beats shuffled-return null          FAIL    p=0.200
- 8  Monte Carlo DD-breach risk          PASS    P(max DD >= 10%) = 0.0% of 500 sims
+ 8  Monte Carlo DD-breach risk          PASS    P(max DD >= 10%) = 0.0% of 2000 sims
 
  Portfolio: +0.08% return, 0.37% max DD, 13 trades, PF 1.09, Sharpe 0.16
+ Walk-forward OOS: -0.44% return, Sharpe -0.53, PF 0.76
 ```
+
+These are the numbers that command produces with the committed config
+(`walk_forward.n_splits: 5`, `monte_carlo.n_sims: 2000`, `max_trials: 64`, which
+the walk-forward multiplies across its 5 windows to reach 320). An earlier revision
+of this README quoted a 4-split run with 500 simulations; the portfolio line was
+identical but checks 2, 5, 6 and 8 were not. Quoting a run whose flags are not
+written down is how documentation drifts, so the command is now part of the quote.
 
 Why this is the correct answer rather than a failure of the project:
 
@@ -38,9 +51,19 @@ Why this is the correct answer rather than a failure of the project:
   +0.08% over 2,500 bars with 541 in fees.
 - **13 trades cannot support any conclusion.** Check 1 exists to stop you reading
   a 38.5% win rate as information. It isn't.
-- **Check 6 is the important one.** Parameters chosen in-sample lost their edge
-  out of sample (ratio −0.27). That is what overfitting looks like when you
-  measure it instead of hoping.
+- **Check 6 is `n/a`, and that is worse than a failure.** It compares each
+  walk-forward window's out-of-sample objective against its in-sample one. With 13
+  trades spread over 5 rolling windows, no training window reaches the minimum
+  trades needed to compute an objective at all, so the ratio is undefined and the
+  check reports `n/a` rather than guessing. The overfitting question - do parameters
+  chosen in-sample keep working out of sample? - **cannot be answered on this data
+  in either direction.** An earlier 4-split configuration had windows large enough
+  to produce a ratio of −0.27, i.e. the fit inverted; that is consistent with what
+  check 5 and the OOS numbers already show (−0.44%, Sharpe −0.53, PF 0.76).
+- **The checks that did run all point the same way.** DSR 0.002 across 320 trials
+  says the Sharpe is indistinguishable from the best of 320 random tries; the
+  shuffled-return null at p=0.200 says the equity curve is indistinguishable from
+  its own permutation. Neither is a close call.
 
 What would change the verdict is **real data**, not more tuning:
 
