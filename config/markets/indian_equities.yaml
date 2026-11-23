@@ -22,6 +22,8 @@ universe:
   - BAJFINANCE.NS
   min_quote_volume: 1000000
   max_symbols: 12
+  nse_index: NIFTY 500   # --data-source nse pulls this index's members in one call;
+                         # the 12 symbols above are the offline/synthetic fallback
 risk:
   correlation_threshold: 0.65   # large caps vs Nifty
   allow_short: false

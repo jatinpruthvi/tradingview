@@ -103,10 +103,19 @@ class DataStore:
             from .tv_screener_source import TvScreenerSource
 
             src = TvScreenerSource(market=self.cfg.universe.market)
+        elif name in ("nse", "nseindia", "india"):
+            from .nse import NseSource
+
+            src = NseSource(index=self.cfg.universe.nse_index,
+                            market=self.cfg.universe.market)
+        elif name in ("yahoo_chart", "yahoo-chart", "ychart"):
+            from .nse import YahooChartSource
+
+            src = YahooChartSource(market=self.cfg.universe.market)
         else:
             raise DataError(
                 f"unknown data source {name!r}. "
-                f"Options: synthetic, csv, ccxt, yfinance, tvscreener"
+                f"Options: synthetic, csv, ccxt, yfinance, tvscreener, nse, yahoo_chart"
             )
         self._sources[name] = src
         return src

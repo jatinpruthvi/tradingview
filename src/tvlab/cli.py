@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -119,7 +120,8 @@ def markets() -> None:
 @click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
 @click.option("--symbols", default=None, help="comma-separated, overrides the config")
 @click.option("--data-source", default=None,
-              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener"]))
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart"]))
 @click.option("--timeframe", default=None)
 @click.option("--limit", type=int, default=None)
 @click.option("--export", type=click.Path(path_type=Path), default=None,
@@ -175,12 +177,16 @@ def data(market, style, config, set_pairs, symbols, data_source, timeframe, limi
 @click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
 @click.option("--symbols", default=None)
 @click.option("--data-source", default=None,
-              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener"]))
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart"]))
 @click.option("--screener", is_flag=True,
               help="build the universe from the TradingView screener first")
 @click.option("--timeframe", default=None)
 @click.option("--top", type=int, default=20)
-def scan(market, style, config, set_pairs, symbols, data_source, screener, timeframe, top) -> None:
+@click.option("--trendlines", is_flag=True, default=False,
+              help="also fit diagonal support/resistance (~27 ms per symbol)")
+def scan(market, style, config, set_pairs, symbols, data_source, screener, timeframe, top,
+         trendlines) -> None:
     """Screen a universe and report the current setup state per symbol.
 
     For each symbol this reports the higher-timeframe trend, whether a liquidity
@@ -212,19 +218,27 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
 
     store = DataStore(cfg)
     strat = build_strategy(cfg)
-    rows, errors = scan_universe(store, cfg, syms[:top * 2], strat=strat, timeframe=tf)
+    rows, errors = scan_universe(store, cfg, syms[:top * 2], strat=strat, timeframe=tf,
+                                 with_trendlines=trendlines)
 
     t = Table(title=f"Scan - {cfg.strategy.name} on {tf} ({cfg.universe.market})")
-    for col in ("symbol", "last", "chg %", "trend", "ADX", "RSI", "ATR %",
-                "sweep", "sweep age", "FVG/OB", "signal", "stop", "target", "R:R"):
+    cols = ["symbol", "last", "chg %", "trend", "ADX", "RSI", "ATR %",
+            "sweep", "sweep age", "FVG/OB", "signal", "stop", "target", "R:R"]
+    if trendlines:
+        cols += ["support %", "resist %", "channel %"]
+    for col in cols:
         t.add_column(col, justify="left" if col == "symbol" else "right")
+    #: padding for the short NO DATA / FAILED rows. Derived from the column count
+    #: rather than hardcoded: it was a literal 11, which silently misaligns the
+    #: table the moment a column is added.
+    pad = len(cols) - 3
 
     _trend_markup = {1: "[green]UP[/green]", -1: "[red]DOWN[/red]", 0: "flat"}
     _signal_markup = {1: "[green]LONG[/green]", -1: "[red]SHORT[/red]", 0: "-"}
 
     for r in rows:
         if r.bars < 2:
-            t.add_row(r.symbol, "NO DATA", (r.warnings or [""])[0][:70], *[""] * 11)
+            t.add_row(r.symbol, "NO DATA", (r.warnings or [""])[0][:70], *[""] * pad)
             continue
         t.add_row(
             r.symbol, f"{r.last:,.4g}", f"{r.change_pct:+.2f}",
@@ -239,9 +253,11 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
             f"{r.stop:,.4g}" if r.stop is not None else "-",
             f"{r.target:,.4g}" if r.target is not None else "-",
             f"{r.reward_risk:.2f}" if r.reward_risk is not None else "-",
+            *([_pct(r.support_pct), _pct(r.resistance_pct), _pct(r.channel_pct)]
+              if trendlines else []),
         )
     for sym, err in errors.items():
-        t.add_row(sym, "FAILED", err[:70], *[""] * 11)
+        t.add_row(sym, "FAILED", err[:70], *[""] * pad)
 
     console.print(t)
 
@@ -269,7 +285,8 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
 @click.option("--symbols", default=None)
 @click.option("--strategy", "strategy_name", default=None)
 @click.option("--data-source", default=None,
-              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener"]))
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart"]))
 @click.option("--timeframe", default=None)
 @click.option("--limit", type=int, default=None)
 @click.option("--out", type=click.Path(path_type=Path), default=None)
@@ -326,7 +343,8 @@ def backtest(market, style, config, set_pairs, symbols, strategy_name, data_sour
 @click.option("--symbols", default=None)
 @click.option("--strategy", "strategy_name", default=None)
 @click.option("--data-source", default=None,
-              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener"]))
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart"]))
 @click.option("--out", type=click.Path(path_type=Path), default=None)
 @click.option("--no-walk-forward", is_flag=True)
 @click.option("--no-monte-carlo", is_flag=True)
@@ -425,7 +443,8 @@ def study(market, style, config, set_pairs, symbols, strategy_name, data_source,
 @click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
 @click.option("--symbols", default=None)
 @click.option("--data-source", default=None,
-              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener"]))
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart"]))
 @click.option("--strategies", default=None,
               help="comma-separated; default is all registered")
 def compare(market, style, config, set_pairs, symbols, data_source, strategies) -> None:
@@ -623,6 +642,255 @@ def _p(v: Any) -> str:
         return f"{float(v) * 100:.1f}%"
     except (TypeError, ValueError):
         return str(v)
+
+
+def _catch_data_error(fn):
+    """Turn a DataError into a readable one-line failure.
+
+    NSE serves 403s, HTML interstitials and changed field names as a matter of
+    course, and Yahoo rate-limits. Those are expected operating conditions for
+    this command group, so they should read as a message with a hint, not as a
+    traceback that buries the cause.
+    """
+    import functools
+
+    from .data.base import DataError
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except DataError as exc:
+            console.print(f"[red]{exc}[/red]")
+            console.print("[dim]NSE and Yahoo are undocumented public endpoints: they rate-limit, "
+                          "serve an HTML interstitial when they want a browser cookie, and change "
+                          "field names without notice. Retry, run from a residential connection, "
+                          "or fall back to --data-source synthetic.[/dim]")
+            sys.exit(1)
+
+    return wrapper
+
+
+def _nse_src(cfg: AppConfig, index: Optional[str] = None):
+    """Build an :class:`~tvlab.data.nse.NseSource`, failing with guidance."""
+    from .data.nse import NseSource
+
+    return NseSource(index=index or cfg.universe.nse_index, market=cfg.universe.market)
+
+
+@cli.group()
+def nse() -> None:
+    """India: NSE session clock, index breadth, liquidity and universe.
+
+    Reads NSE's own public JSON APIs plus Yahoo's public chart endpoint. No
+    vendor, no API key and no ``yfinance`` install - only the standard library.
+    The machine running this must be able to reach ``nseindia.com`` and
+    ``query1.finance.yahoo.com``.
+
+    These commands describe the market as it is. None of them is a signal, a
+    tip or a prediction, and nothing here has been validated as profitable:
+    ``tvlab study --market indian_equities`` is the command that decides whether
+    a rule set deserves money, and today it says NOT VALIDATED.
+    """
+
+
+@nse.command("session")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="intraday", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--index", default=None, help="NSE index to read the universe from")
+@_catch_data_error
+def nse_session(market, style, config, index) -> None:
+    """Is the NSE cash market open right now, and for how much longer?
+
+    Answers from NSE's published holiday calendar, not just the weekday - so a
+    market holiday is reported as closed instead of looking like a quiet session.
+    """
+    from .data.nse import IST, SESSION_END_MIN, SESSION_START_MIN
+
+    cfg = _cfg(market, style, config, ())
+    src = _nse_src(cfg, index)
+    now = datetime.now(IST)
+    open_now = src.is_session_open(now)
+    left = src.minutes_to_close(now)
+
+    console.print(f"[bold]NSE cash session[/bold]  {now:%A %d %b %Y %H:%M:%S} IST")
+    console.print(f"  regular hours   {SESSION_START_MIN // 60:02d}:{SESSION_START_MIN % 60:02d}"
+                  f" - {SESSION_END_MIN // 60:02d}:{SESSION_END_MIN % 60:02d} IST")
+    console.print(f"  market open     [bold {'green' if open_now else 'red'}]{'YES' if open_now else 'NO'}[/]")
+    if open_now and left is not None:
+        note = ""
+        if left <= 15:
+            note = "  [red]- closing auction territory; a same-day trade here has almost no time to work[/]"
+        elif left <= 60:
+            note = "  [yellow]- under an hour left[/]"
+        console.print(f"  minutes to close  {left}{note}")
+    elif now.weekday() >= 5:
+        console.print("  [dim]weekend[/dim]")
+    else:
+        try:
+            hol = src.trading_holidays()
+            if now.date() in hol:
+                console.print(f"  [yellow]market holiday[/yellow]")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@nse.command("breadth")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="intraday", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--index", default=None)
+@_catch_data_error
+def nse_breadth(market, style, config, index) -> None:
+    """Every NSE index: level, change, advances/declines and PE.
+
+    Breadth is the read that matters most for an intraday long-only mandate.
+    ``allow_short`` is false for Indian equities, so on a day when declines
+    outnumber advances there is no trade to take - and that is knowable before
+    the open rather than after the loss.
+    """
+    cfg = _cfg(market, style, config, ())
+    df = _nse_src(cfg, index).indices()
+
+    t = Table(title="NSE index breadth", show_lines=False)
+    for col, justify in (("index", "left"), ("last", "right"), ("pct_change", "right"),
+                         ("advances", "right"), ("declines", "right"), ("breadth", "right"),
+                         ("pe", "right")):
+        t.add_column(col, justify=justify)
+    for _, r in df.iterrows():
+        b = r.get("breadth")
+        colour = "green" if (b or 0) > 0.1 else ("red" if (b or 0) < -0.1 else "yellow")
+        t.add_row(str(r["index"]), _cell(r["last"]), _cell(r["pct_change"]),
+                  str(int(r["advances"])), str(int(r["declines"])),
+                  f"[{colour}]{_cell(b)}[/]", _cell(r["pe"]))
+    console.print(t)
+
+    nifty = df[df["index"].str.upper().str.startswith("NIFTY 50")]
+    if not nifty.empty:
+        b = nifty.iloc[0].get("breadth")
+        if b is not None and not pd.isna(b):
+            if b > 0.2:
+                read = "advances dominate - a long-only intraday mandate has room to work"
+            elif b < -0.2:
+                read = "[red]declines dominate - with allow_short=false there is no intraday trade here[/red]"
+            else:
+                read = "mixed breadth - index moves are being driven by a few weights, not the market"
+            console.print(f"\nNIFTY 50 breadth {b:+.2f}: {read}")
+
+
+@nse.command("liquidity")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="intraday", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--index", default="NIFTY 500", show_default=True,
+              help='NSE index, or "SECURITIES IN F&O"')
+@click.option("--top", default=25, show_default=True)
+@_catch_data_error
+def nse_liquidity(market, style, config, index, top) -> None:
+    """The most tradeable names right now, ranked by traded value.
+
+    Ranked by rupees traded, not by share volume. A ₹21 stock with 90 million
+    shares traded is a smaller position than a ₹2,950 stock with 8 million -
+    ranking on volume alone sends you into the name you cannot exit.
+    """
+    cfg = _cfg(market, style, config, ())
+    snap = _nse_src(cfg, index).snapshot(index)
+    if snap.empty:
+        console.print("[yellow]NSE returned no EQ-series rows for that index[/yellow]")
+        return
+
+    snap = snap.head(top)
+    t = Table(title=f"NSE liquidity - top {len(snap)} of {index} by traded value")
+    for col, justify in (("symbol", "left"), ("ltp", "right"), ("pct_change", "right"),
+                         ("day_low", "right"), ("day_high", "right"),
+                         ("traded_value_cr", "right"), ("range_pct", "right")):
+        t.add_column(col, justify=justify)
+    for _, r in snap.iterrows():
+        lo, hi, ltp = r["low"], r["high"], r["ltp"]
+        rng = (hi - lo) / lo * 100 if lo and hi and lo > 0 else float("nan")
+        pct = r["pct_change"]
+        colour = "green" if (pct or 0) > 0 else ("red" if (pct or 0) < 0 else "white")
+        t.add_row(str(r["symbol"]), _cell(ltp), f"[{colour}]{_cell(pct)}[/]",
+                  _cell(lo), _cell(hi), f"{(r['traded_value'] or 0) / 1e7:,.1f}", _cell(rng))
+    console.print(t)
+    console.print("\n[dim]traded_value_cr is in crore rupees. range_pct is today's high-low as a "
+                  "percent of the low - the room a same-day trade actually has.[/dim]")
+
+
+@nse.command("universe")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="intraday", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--top", default=0, help="keep only the N most liquid names (0 = all)")
+@_catch_data_error
+def nse_universe(market, style, config, top) -> None:
+    """List the live NSE universe: Nifty 500 members plus every F&O security.
+
+    This replaces a hand-typed symbol list with whatever NSE publishes today.
+    Pass ``--top N`` to rank by traded value first, which is what you want
+    before feeding names into ``tvlab scan``.
+    """
+    cfg = _cfg(market, style, config, ())
+    src = _nse_src(cfg)
+    syms = src.list_symbols()
+    console.print(f"{len(syms)} symbols (Nifty 500 CSV + NSE F&O list)")
+
+    if top:
+        from .data.nse import top_by_liquidity
+
+        try:
+            syms = top_by_liquidity(syms, src.snapshot("NIFTY 500"), top)
+            console.print(f"narrowed to the {len(syms)} most liquid by traded value")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]could not rank by liquidity ({exc}); showing the first {top}[/yellow]")
+            syms = syms[:top]
+
+    console.print(", ".join(syms))
+    console.print("\n[dim]To use these: tvlab scan --market indian_equities --style intraday "
+                  "--data-source nse --symbols " + ",".join(syms[:6]) + ",...[/dim]")
+
+
+@nse.command("holidays")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="intraday", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--index", default=None)
+@click.option("--days", default=180, show_default=True, help="look ahead this many days")
+@_catch_data_error
+def nse_holidays(market, style, config, index, days) -> None:
+    """Upcoming NSE cash-market trading holidays.
+
+    Matters for backtests as much as for planning: a bar series with holiday
+    gaps will show ATR and ADX artefacts at the seams if the calendar is ignored.
+    """
+    from .data.nse import IST
+
+    cfg = _cfg(market, style, config, ())
+    hol = sorted(_nse_src(cfg, index).trading_holidays())
+    today = datetime.now(IST).date()
+    upcoming = [d for d in hol if today <= d <= today + timedelta(days=days)]
+    if not upcoming:
+        console.print(f"[dim]no NSE trading holidays in the next {days} days[/dim]")
+        return
+    t = Table(title=f"NSE trading holidays - next {days} days")
+    t.add_column("date", justify="left")
+    t.add_column("weekday", justify="left")
+    for d in upcoming:
+        t.add_row(d.isoformat(), d.strftime("%A"))
+    console.print(t)
+
+
+def _pct(v: Optional[float]) -> str:
+    """Signed percentage, or '-' when the value is missing.
+
+    Missing is common and meaningful here: a symbol can have a fitted support and
+    no resistance above price, and rendering that as 0.00 would claim the market
+    is sitting exactly on a line it is nowhere near.
+    """
+    if v is None or not np.isfinite(v):
+        return "-"
+    return f"{v:+.2f}"
 
 
 def _cell(v: Any) -> str:

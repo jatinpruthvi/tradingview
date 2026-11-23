@@ -86,6 +86,12 @@ class UniverseConfig:
     quote_currency: str = "USDT"
     min_quote_volume: float = 1_000_000.0
     max_symbols: int = 20
+    #: Which NSE index ``--data-source nse`` pulls its universe and market-watch
+    #: snapshot from. One market-watch call returns every member with price,
+    #: volume and traded value, so this replaces a hand-typed symbol list with
+    #: whatever NSE says the index contains today. Also accepts the special name
+    #: "SECURITIES IN F&O". Ignored by every other data source.
+    nse_index: str = "NIFTY 500"
 
 
 @dataclass(frozen=True)

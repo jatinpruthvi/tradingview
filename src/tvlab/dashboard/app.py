@@ -368,6 +368,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         symbols: Optional[str] = None,
         timeframe: Optional[str] = None,
         top: Optional[int] = Query(None, ge=1, le=500),
+        trendlines: bool = Query(False, description="also fit diagonal support/resistance"),
     ) -> Dict[str, Any]:
         """Current setup state across the universe.
 
@@ -391,7 +392,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         strat = build_strategy(c)
         store = DataStore(c)
         rows, errors = scan_universe(store, c, syms, strat=strat,
-                                     timeframe=c.timeframe.execution, bars=SCAN_BARS)
+                                     timeframe=c.timeframe.execution, bars=SCAN_BARS,
+                                     with_trendlines=trendlines)
 
         payload = []
         for r in rank(rows, live_only=False):

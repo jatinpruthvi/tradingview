@@ -357,3 +357,75 @@ def test_allocation_report_carries_the_threshold(cfg):
     alloc = allocate(_book(), cfg, scheme="equal")
     r = allocation_report(alloc, 100_000.0, cfg.risk.risk_per_trade)
     assert r["corr_threshold"] == cfg.risk.correlation_threshold
+
+
+# ---------------------------------------------------------------- trendlines
+# Wired from tvlab.indicators.trendlines into the scanner. Opt-in, because a
+# pivot-pair fit costs ~27 ms per symbol on 1,200 bars - free for a watchlist,
+# 25 s across a 500-name universe.
+
+
+def test_scan_row_defaults_trendline_fields_to_none(store, cfg):
+    """A scan that did not ask for trendlines must report None, not 0.0. A zero
+    would claim price is sitting exactly on a line it is nowhere near."""
+    from tvlab.screener import scan_symbol
+
+    st, syms = store if isinstance(store, tuple) else (store, None)
+    row = scan_symbol(st, cfg, "BTC/USDT")
+    assert row.support_pct is None
+    assert row.resistance_pct is None
+    assert row.channel_pct is None
+
+
+def test_scan_populates_trendlines_when_asked(store, cfg):
+    from tvlab.screener import scan_symbol
+
+    st = store[0] if isinstance(store, tuple) else store
+    row = scan_symbol(st, cfg, "BTC/USDT", with_trendlines=True)
+    # at least one side should be fitted on 1,200 synthetic bars; if neither is,
+    # the fit must have said so in warnings rather than failing silently
+    if row.support_pct is None and row.resistance_pct is None:
+        assert any("trendline" in w or "no trendlines" in w for w in row.warnings), row.warnings
+    else:
+        assert np.isfinite(row.support_pct if row.support_pct is not None else 0)
+
+
+def test_scan_trendline_signs_match_their_meaning(store, cfg):
+    """support_pct is below price (negative), resistance_pct above (positive)."""
+    from tvlab.screener import scan_symbol
+
+    st = store[0] if isinstance(store, tuple) else store
+    row = scan_symbol(st, cfg, "BTC/USDT", with_trendlines=True)
+    if row.support_pct is not None:
+        assert row.support_pct < 0, row.support_pct
+    if row.resistance_pct is not None:
+        assert row.resistance_pct > 0, row.resistance_pct
+
+
+def test_scan_universe_threads_the_trendline_flag(store, cfg):
+    from tvlab.screener import scan_universe
+
+    st = store[0] if isinstance(store, tuple) else store
+    rows, errors = scan_universe(st, cfg, ["BTC/USDT", "ETH/USDT"], with_trendlines=True)
+    assert len(rows) == 2 and not errors
+    # to_dict feeds both the CLI table and /api/scan, so the fields must survive it
+    for r in rows:
+        d = r.to_dict()
+        for key in ("support_pct", "resistance_pct", "channel_pct"):
+            assert key in d, key
+
+
+def test_a_trendline_fit_failure_cannot_lose_the_rest_of_the_row(store, cfg, monkeypatch):
+    """An indicator blowing up must degrade that column, not the whole scan."""
+    from tvlab.indicators import trendlines as tl
+    from tvlab.screener import scan_symbol
+
+    def boom(*a, **k):
+        raise RuntimeError("fit exploded")
+
+    monkeypatch.setattr(tl, "trendline_state", boom)
+    st = store[0] if isinstance(store, tuple) else store
+    row = scan_symbol(st, cfg, "BTC/USDT", with_trendlines=True)
+    assert row.symbol == "BTC/USDT"
+    assert row.support_pct is None
+    assert any("trendline error" in w for w in row.warnings), row.warnings

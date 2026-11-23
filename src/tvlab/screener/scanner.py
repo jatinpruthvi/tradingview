@@ -70,6 +70,13 @@ class ScanRow:
     reward_risk: Optional[float] = None
     bars: int = 0
     as_of: Optional[str] = None
+    #: Nearest fitted trendline as a signed percentage of last price: support is
+    #: negative (below), resistance positive (above). Populated only when the scan
+    #: is asked for trendlines - fitting is ~27 ms per symbol on 1,200 bars, which
+    #: is free for a watchlist and 25 s across a 500-name universe.
+    support_pct: Optional[float] = None
+    resistance_pct: Optional[float] = None
+    channel_pct: Optional[float] = None
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -90,12 +97,16 @@ def _finite(x: Any) -> Optional[float]:
 
 def scan_symbol(store, cfg: AppConfig, symbol: str, strat: Optional[Strategy] = None,
                 timeframe: Optional[str] = None, bars: int = SCAN_BARS,
-                bias: Optional[pd.DataFrame] = None) -> ScanRow:
+                bias: Optional[pd.DataFrame] = None,
+                with_trendlines: bool = False) -> ScanRow:
     """Read the current setup state of one symbol.
 
     ``bias`` may be supplied to avoid a second fetch when scanning a universe;
     it must be NATIVE higher-timeframe bars (what ``store.bias_frame`` returns),
     not bars pre-aligned onto the execution index.
+
+    ``with_trendlines`` adds the nearest diagonal support and resistance. It is
+    opt-in because it costs a pivot-pair fit per symbol.
     """
     strat = strat or build_strategy(cfg)
     p = strat.params
@@ -176,6 +187,22 @@ def scan_symbol(store, cfg: AppConfig, symbol: str, strat: Optional[Strategy] = 
             if r_mult:
                 row.reward_risk = float(r_mult)
 
+    if with_trendlines:
+        # Fitted on df alone, so it describes the last bar and cannot see the
+        # future. A fit failure must not lose the rest of the row.
+        try:
+            from ..indicators.trendlines import trendline_state
+
+            tl = trendline_state(df, tf, swing_length=max(3, int(p.get("swing_length", 8))))
+            row.support_pct = _finite(tl["nearest_support_pct"])
+            row.resistance_pct = _finite(tl["nearest_resistance_pct"])
+            row.channel_pct = _finite(tl["channel_pct"])
+            if not tl["available"]:
+                row.warnings.append(f"no trendlines fitted ({tl['reason']})")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: trendline fit failed (%s)", symbol, exc)
+            row.warnings.append(f"trendline error: {exc}")
+
     if bias is None:
         row.warnings.append("no higher-timeframe bias; trend filter ran on the execution frame")
     return row
@@ -184,6 +211,7 @@ def scan_symbol(store, cfg: AppConfig, symbol: str, strat: Optional[Strategy] = 
 def scan_universe(store, cfg: AppConfig, symbols: Sequence[str],
                   strat: Optional[Strategy] = None, timeframe: Optional[str] = None,
                   bars: int = SCAN_BARS, with_bias: bool = True,
+                  with_trendlines: bool = False,
                   ) -> Tuple[List[ScanRow], Dict[str, str]]:
     """Scan every symbol, collecting per-symbol errors instead of aborting.
 
@@ -204,7 +232,7 @@ def scan_universe(store, cfg: AppConfig, symbols: Sequence[str],
                 except Exception as exc:  # noqa: BLE001
                     log.debug("%s: bias unavailable (%s)", sym, exc)
             rows.append(scan_symbol(store, cfg, sym, strat=strat, timeframe=timeframe,
-                                    bars=bars, bias=bias))
+                                    bars=bars, bias=bias, with_trendlines=with_trendlines))
         except Exception as exc:  # noqa: BLE001
             errors[sym] = f"{type(exc).__name__}: {exc}"
             log.warning("scan failed for %s: %s", sym, exc)

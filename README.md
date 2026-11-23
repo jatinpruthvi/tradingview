@@ -257,14 +257,21 @@ strips nested `.git` directories. `koala73/worldmonitor` fails a plain clone
 |:--------|:------|:-------------------------|
 | GPL-3.0 | `tradingview-pinescript-indicators`, `freqtrade` | copyleft — reference only, no code copied into `src/tvlab/` |
 | AGPL-3.0 | `worldmonitor` | must not be embedded in the served dashboard |
+| MIT | `market-lab`, `pynecore-strategies`, `TradingView-Screener`, `tradingview-mcp` (both), `pytrendline`, `smart-money-concepts`, `congress-trading-monitor` | attribution |
 | none | `algorithmic-trading-python` | no reuse |
 | NOASSERTION | `tradingview-mcp` (tradesdontlie), `journalit` | reference only |
-| Apache-2.0 | `lightweight-charts`, `smart-money-concepts` | bundle vendored with its LICENSE file |
+| Apache-2.0 | `lightweight-charts`, `tvscreener`, `pynecore`, `KLineChart`, `VisualHFT` | attribution; the chart bundle is vendored with its LICENSE file |
 
 Nothing from a GPL/AGPL/unlicensed repo is imported at runtime. The one runtime
 PyPI dependency drawn from this family is `smartmoneyconcepts`, used **only** by
 `indicators/reference.py` for cross-validation — never in a trading path, because
 it looks ahead.
+
+**[`VENDOR.md`](VENDOR.md) records what was taken from each of the 18 repos, and
+why the other twelve were not.** Short version: 5 used at runtime, 1 evaluated
+and rejected then reimplemented natively (`pytrendline` is incompatible with
+pandas 2 and roughly cubic), 12 reference-only — four of those because copying
+them would violate their licence.
 
 ---
 
