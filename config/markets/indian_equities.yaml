@@ -1,0 +1,31 @@
+# indian_equities market profile
+#
+# NSE cash segment: allow_short is false because intraday shorting requires the F&O segment. fee_bps approximates brokerage + STT + exchange txn + GST. Session 09:15-15:30 IST; daily bars only unless you have a tick vendor.
+#
+# Layered on top of config/default.yaml, then config/styles/<style>.yaml.
+universe:
+  market: indian_equities
+  exchange: NSE
+  quote_currency: INR
+  symbols:
+  - RELIANCE.NS
+  - TCS.NS
+  - HDFCBANK.NS
+  - INFY.NS
+  - ICICIBANK.NS
+  - SBIN.NS
+  - ITC.NS
+  - BHARTIARTL.NS
+  - KOTAKBANK.NS
+  - LT.NS
+  - TATAMOTORS.NS
+  - BAJFINANCE.NS
+  min_quote_volume: 1000000
+  max_symbols: 12
+risk:
+  correlation_threshold: 0.65   # large caps vs Nifty
+  allow_short: false
+  max_leverage: 1.0
+costs:
+  fee_bps: 3.0
+  slippage_bps: 5.0

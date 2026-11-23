@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>tvlab — trading workbench</title>
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#131a2e; --panel2:#0f1526; --line:#22304f;
+    --text:#e6edf7; --muted:#8fa2c0; --accent:#4f8cff; --up:#16a34a; --down:#dc2626;
+    --warn:#f59e0b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;background:var(--panel);
+         border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;letter-spacing:.3px}
+  header .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);
+              padding:2px 7px;border-radius:999px}
+  select,button,input{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+        border-radius:6px;padding:5px 9px;font-size:13px;font-family:inherit}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;padding:14px}
+  @media(max-width:1100px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);
+           margin:0;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .card .body{padding:12px 14px}
+  #chart{height:460px;width:100%}
+  #rsichart{height:110px;width:100%}
+  #equitychart{height:260px;width:100%}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:right;padding:5px 8px;border-bottom:1px solid rgba(34,48,79,.55)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.6px}
+  tr:hover td{background:rgba(79,140,255,.06)}
+  .pos{color:var(--up)} .neg{color:var(--down)} .mut{color:var(--muted)}
+  .pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600}
+  .pill.long{background:rgba(22,163,74,.18);color:#4ade80}
+  .pill.short{background:rgba(220,38,38,.18);color:#f87171}
+  .pill.flat{background:rgba(143,162,192,.15);color:var(--muted)}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}
+  .kpi{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  .kpi .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
+  .kpi .v{font-size:19px;font-weight:650;margin-top:2px}
+  .verdict{padding:11px 14px;border-left:4px solid var(--muted);background:var(--panel2);
+           margin-bottom:11px;border-radius:0 8px 8px 0}
+  .verdict.pass{border-color:var(--up)} .verdict.fail{border-color:var(--down)}
+  .verdict.partial{border-color:var(--warn)}
+  .verdict b{font-size:15px}
+  .note{font-size:11.5px;color:var(--muted);margin-top:6px}
+  .warn{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);
+        color:#fcd34d;padding:8px 11px;border-radius:8px;font-size:12px;margin-bottom:10px}
+  .err{background:rgba(220,38,38,.12);border:1px solid rgba(220,38,38,.4);color:#fca5a5;
+       padding:8px 11px;border-radius:8px;font-size:12px;margin-bottom:10px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .stack{display:flex;flex-direction:column;gap:14px}
+  code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
+        border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .scroll{max-height:420px;overflow:auto}
+  footer{padding:10px 18px;color:var(--muted);font-size:11.5px;border-top:1px solid var(--line)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>tvlab</h1>
+  <span class="tag" id="srcTag">—</span>
+  <div class="row">
+    <label class="mut">Market</label><select id="market"></select>
+    <label class="mut">Style</label><select id="style"></select>
+    <label class="mut">Strategy</label><select id="strategy"></select>
+    <label class="mut">TF</label><select id="timeframe"></select>
+    <label class="mut">Source</label><select id="datasource"></select>
+    <label class="mut">Symbol</label><select id="symbol"></select>
+  </div>
+  <div class="row" style="margin-left:auto">
+    <button id="btnScan">Scan</button>
+    <button id="btnRun" class="primary">Run backtest</button>
+    <button id="btnReport">Load report</button>
+    <span id="busy" style="display:none"><span class="spin"></span></span>
+  </div>
+</header>
+
+<main>
+  <div class="stack">
+    <div class="card">
+      <h2 id="chartTitle">Chart</h2>
+      <div class="body">
+        <div id="chart"></div>
+        <div id="rsichart"></div>
+        <div class="note">
+          Markers: <span class="pill long">sweep</span> liquidity sweep ·
+          BOS break of structure · CHoCH change of character.
+          Swing pivots are plotted at <b>confirmation</b> time (pivot bar + swing length),
+          which is the first bar a trader could actually know about them.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Portfolio equity</h2>
+      <div class="body"><div id="equitychart"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Scan — current setup state</h2>
+      <div class="body scroll"><div id="scanTable" class="mut">Press “Scan”.</div></div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <h2>Results</h2>
+      <div class="body">
+        <div id="verdict"></div>
+        <div id="kpis" class="grid2"></div>
+        <div id="warnbox"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Risk mandate</h2>
+      <div class="body" id="riskBox"></div>
+    </div>
+
+    <div class="card">
+      <h2>Per symbol</h2>
+      <div class="body scroll" id="perSymbol"></div>
+    </div>
+
+    <div class="card">
+      <h2>Exit reasons &amp; setups</h2>
+      <div class="body scroll" id="breakdown"></div>
+    </div>
+
+    <div class="card">
+      <h2>Validity checks</h2>
+      <div class="body scroll" id="checks"></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  Charts rendered with TradingView <b>lightweight-charts</b> (Apache-2.0, vendored from
+  <code>vendor/lightweight-charts</code>). All computation is server-side.
+  Nothing here is investment advice; a backtest is a description of one historical sample.
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { cfg:null, chart:null, candle:null, volume:null, rsiChart:null, rsiLine:null,
+                eqChart:null, eqLine:null, series:[], markers:[] };
+
+const fmt = (v,d=2)=> (v===null||v===undefined||Number.isNaN(v)) ? '—'
+        : Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const pct = (v,d=2)=> (v===null||v===undefined||Number.isNaN(v)) ? '—' : `${fmt(v,d)}%`;
+const cls = (v)=> v>0?'pos':(v<0?'neg':'mut');
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok){ let d; try{ d=(await r.json()).detail }catch(e){ d=r.statusText }
+             throw new Error(d||`${r.status}`) }
+  return r.json();
+}
+const busy = (on)=> { $('busy').style.display = on?'inline-block':'none'; };
+function showErr(where, e){ $(where).innerHTML = `<div class="err">${e.message||e}</div>` }
+
+// ------------------------------------------------------------------- bootstrap
+async function boot(){
+  try{
+    state.cfg = await api('/api/config');
+  }catch(e){ document.body.innerHTML = `<div class="err" style="margin:20px">${e.message}</div>`; return }
+  const c = state.cfg, av = c.available;
+  fill('market', av.markets, c.market);
+  fill('style', av.styles, 'swing');
+  fill('strategy', av.strategies, c.strategy.name);
+  fill('timeframe', av.timeframes, c.timeframe.execution);
+  fill('datasource', av.data_sources, c.data_source);
+  fill('symbol', c.symbols, c.symbols[0]);
+  $('srcTag').textContent = `${c.market} · ${c.timeframe.execution} · ${c.data_source}`;
+  renderRisk(c);
+  for(const id of ['market','style','strategy','timeframe','datasource'])
+    $(id).addEventListener('change', onConfigChange);
+  $('symbol').addEventListener('change', ()=>loadChart());
+  $('btnRun').addEventListener('click', runBacktest);
+  $('btnScan').addEventListener('click', runScan);
+  $('btnReport').addEventListener('click', loadReport);
+  await loadChart();
+  await runBacktest();
+}
+function fill(id, opts, cur){
+  const el = $(id); el.innerHTML='';
+  for(const o of opts){
+    const e=document.createElement('option'); e.value=o; e.textContent=o;
+    if(o===cur) e.selected=true; el.appendChild(e);
+  }
+}
+async function onConfigChange(){
+  busy(true);
+  try{
+    const payload = { market:$('market').value, style:$('style').value,
+                      strategy:$('strategy').value, timeframe:$('timeframe').value,
+                      data_source:$('datasource').value };
+    state.cfg = await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+                                         body:JSON.stringify(payload)});
+    const c = state.cfg;
+    fill('symbol', c.symbols, c.symbols[0]);
+    $('srcTag').textContent = `${c.market} · ${c.timeframe.execution} · ${c.data_source}`;
+    renderRisk(c);
+    await loadChart(); await runBacktest();
+  }catch(e){ showErr('warnbox', e) } finally { busy(false) }
+}
+function renderRisk(c){
+  const r=c.risk, k=c.costs;
+  $('riskBox').innerHTML = `
+   <table>
+    <tr><td>Risk per trade</td><td><b>${(r.risk_per_trade*100).toFixed(2)}%</b></td></tr>
+    <tr><td>Max position</td><td>${(r.max_position_pct*100).toFixed(0)}% of equity</td></tr>
+    <tr><td>Max drawdown halt</td><td><b>${(r.max_drawdown_pct*100).toFixed(0)}%</b></td></tr>
+    <tr><td>Daily loss limit</td><td>${(r.daily_loss_limit_pct*100).toFixed(1)}%</td></tr>
+    <tr><td>Max open positions</td><td>${r.max_open_positions}</td></tr>
+    <tr><td>Shorting</td><td>${r.allow_short?'enabled':'disabled'}</td></tr>
+    <tr><td>Round-trip cost</td><td>${((k.fee_bps+k.slippage_bps)*2).toFixed(1)} bp</td></tr>
+    <tr><td>Capital</td><td>${fmt(c.backtest.initial_capital,0)} ${c.quote_currency}</td></tr>
+   </table>`;
+}
+
+// ----------------------------------------------------------------------- chart
+function mkChart(el, opts={}){
+  return LightweightCharts.createChart(el, Object.assign({
+    layout:{background:{color:'#131a2e'},textColor:'#c8d4e8',fontSize:11},
+    grid:{vertLines:{color:'rgba(34,48,79,.5)'},horzLines:{color:'rgba(34,48,79,.5)'}},
+    timeScale:{timeVisible:true,secondsVisible:false,borderColor:'#22304f'},
+    rightPriceScale:{borderColor:'#22304f'},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+    autoSize:true,
+  }, opts));
+}
+function addLine(chart, color, width=1.5, title=''){
+  const s = chart.addLineSeries({color,lineWidth:width,title,priceLineVisible:false,
+                                 lastValueVisible:false,crosshairMarkerVisible:false});
+  state.series.push(s); return s;
+}
+
+async function loadChart(){
+  const sym=$('symbol').value, tf=$('timeframe').value;
+  $('chartTitle').textContent = `Chart — ${sym} ${tf}`;
+  busy(true);
+  try{
+    const [d, ind] = await Promise.all([
+      api(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&timeframe=${tf}&limit=1200`),
+      api(`/api/indicators?symbol=${encodeURIComponent(sym)}&timeframe=${tf}&limit=1200`),
+    ]);
+    $('srcTag').textContent = `${state.cfg.market} · ${tf} · ${d.source}`;
+
+    if(!state.chart){
+      state.chart = mkChart($('chart'));
+      state.candle = state.chart.addCandlestickSeries({
+        upColor:'#16a34a',downColor:'#dc2626',borderUpColor:'#16a34a',
+        borderDownColor:'#dc2626',wickUpColor:'#4ade80',wickDownColor:'#f87171'});
+      state.volume = state.chart.addHistogramSeries({priceFormat:{type:'volume'},
+        priceScaleId:'vol',color:'rgba(79,140,255,.35)'});
+      state.chart.priceScale('vol').applyOptions({scaleMargins:{top:.86,bottom:0}});
+      state.ema21 = addLine(state.chart,'#f59e0b',1,'EMA21');
+      state.ema50 = addLine(state.chart,'#4f8cff',1,'EMA50');
+      state.ema200= addLine(state.chart,'#a855f7',1.5,'EMA200');
+      state.st    = addLine(state.chart,'#22d3ee',1,'Supertrend');
+    }
+    state.candle.setData(d.candles);
+    state.volume.setData(d.volume);
+    state.ema21.setData(ind.ema21||[]);
+    state.ema50.setData(ind.ema50||[]);
+    state.ema200.setData(ind.ema200||[]);
+    state.st.setData(ind.supertrend||[]);
+
+    // markers: sweeps, BOS, CHoCH, and swing pivots at confirmation time
+    const marks=[];
+    for(const m of (ind.sweep_markers||[])) marks.push(m);
+    for(const m of (ind.bos_markers||[]))   marks.push(m);
+    for(const m of (ind.choch_markers||[])) marks.push(m);
+    for(const p of (ind.swing_highs||[]))
+      marks.push({time:p.time,position:'aboveBar',color:'rgba(248,113,113,.75)',
+                  shape:'circle',text:''});
+    for(const p of (ind.swing_lows||[]))
+      marks.push({time:p.time,position:'belowBar',color:'rgba(74,222,128,.75)',
+                  shape:'circle',text:''});
+    marks.sort((a,b)=>a.time-b.time);
+    state.candle.setMarkers(marks);
+    state.chart.timeScale().fitContent();
+
+    if(!state.rsiChart){
+      state.rsiChart = mkChart($('rsichart'),{rightPriceScale:{borderColor:'#22304f'}});
+      state.rsiLine = state.rsiChart.addLineSeries({color:'#4f8cff',lineWidth:1.2,title:'RSI14'});
+      state.rsiChart.addLineSeries({color:'rgba(220,38,38,.5)',lineWidth:1})
+          .setData([]); // placeholder for band lines
+      state.rsiHi = state.rsiChart.addLineSeries({color:'rgba(220,38,38,.45)',lineWidth:1});
+      state.rsiLo = state.rsiChart.addLineSeries({color:'rgba(22,163,74,.45)',lineWidth:1});
+    }
+    state.rsiLine.setData(ind.rsi||[]);
+    const t=(ind.rsi||[]).map(p=>p.time);
+    state.rsiHi.setData(t.map(x=>({time:x,value:70})));
+    state.rsiLo.setData(t.map(x=>({time:x,value:30})));
+    state.rsiChart.timeScale().setVisibleRange(state.chart.timeScale().getVisibleRange());
+  }catch(e){ showErr('warnbox', e) } finally { busy(false) }
+}
+
+// -------------------------------------------------------------------- backtest
+async function runBacktest(){
+  busy(true); $('warnbox').innerHTML='';
+  try{
+    const r = await api(`/api/backtest?strategy=${$('strategy').value}&timeframe=${$('timeframe').value}`);
+    renderMetrics(r);
+    renderEquity(r.equity||[]);
+    renderPerSymbol(r.per_symbol||[]);
+    renderBreakdown(r.metrics||{});
+  }catch(e){ showErr('warnbox', e) } finally { busy(false) }
+}
+
+function renderMetrics(r){
+  const m=r.metrics||{};
+  const dsr=m.deflated_sharpe||{};
+  const verdict = (m.n_trades||0)<30 || (dsr.dsr!=null && dsr.dsr<0.95) ? 'partial' : 'pass';
+  $('verdict').innerHTML = `
+    <div class="verdict ${verdict}">
+      <b>${r.strategy}</b> · ${r.market} · ${r.timeframe} · ${m.n_bars||0} bars
+      <div class="note">${(m.years||0).toFixed(2)} years of data ·
+        ${m.n_trials||dsr.n_trials||1} optimisation trials credited to the deflated Sharpe</div>
+    </div>`;
+  const kpis=[
+    ['Net P&L', fmt(m.net_pnl,0), cls(m.net_pnl)],
+    ['Total return', pct(m.total_return_pct), cls(m.total_return_pct)],
+    ['CAGR', pct(m.cagr_pct), cls(m.cagr_pct)],
+    ['Max drawdown', pct(m.max_drawdown_pct), 'neg'],
+    ['Sharpe', fmt(m.sharpe), cls(m.sharpe)],
+    ['Sortino', fmt(m.sortino), cls(m.sortino)],
+    ['Calmar', fmt(m.calmar), cls(m.calmar)],
+    ['Profit factor', fmt(m.profit_factor), cls((m.profit_factor||0)-1)],
+    ['Trades', m.n_trades||0, (m.n_trades||0)>=30?'':'neg'],
+    ['Win rate', m.win_rate!=null?pct(m.win_rate*100,1):'—', ''],
+    ['Avg R', fmt(m.avg_r,3), cls(m.avg_r)],
+    ['Expectancy', fmt(m.expectancy,2), cls(m.expectancy)],
+    ['Payoff', fmt(m.payoff_ratio,3), ''],
+    ['Fees paid', fmt(m.total_fees,0), 'neg'],
+    ['Deflated Sharpe', fmt(dsr.dsr,3), (dsr.dsr>=0.95?'pos':(dsr.dsr>=0.8?'':'neg'))],
+    ['DSR verdict', dsr.verdict||'—', dsr.verdict==='pass'?'pos':'neg'],
+  ];
+  $('kpis').innerHTML = kpis.map(([k,v,c])=>
+    `<div class="kpi"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+
+  if(r.benchmark && r.benchmark.metrics){
+    const b=r.benchmark.metrics;
+    $('warnbox').insertAdjacentHTML('beforeend',
+      `<div class="note">Benchmark buy&amp;hold ${r.benchmark.symbol}:
+        ${pct(b.total_return_pct)} return, ${pct(b.max_drawdown_pct)} max DD,
+        Sharpe ${fmt(b.sharpe)}</div>`);
+  }
+  if(state.cfg.data_source==='synthetic'){
+    $('warnbox').insertAdjacentHTML('beforeend',
+      `<div class="warn"><b>Synthetic data.</b> These numbers describe the generator, not any
+       real market. They validate the engine, risk rules and signal plumbing. A trend-follower
+       wins on data built with trending regimes by construction — run
+       <code>tvlab study --data-source ccxt</code> on real bars before believing any of it.</div>`);
+  }
+  for(const w of (r.warnings||[]).slice(0,6))
+    $('warnbox').insertAdjacentHTML('beforeend', `<div class="note">⚠ ${w}</div>`);
+}
+
+function renderEquity(eq){
+  if(!state.eqChart){
+    state.eqChart = mkChart($('equitychart'));
+    state.eqLine = state.eqChart.addAreaSeries({
+      lineColor:'#4f8cff',topColor:'rgba(79,140,255,.35)',bottomColor:'rgba(79,140,255,.03)',
+      lineWidth:2});
+  }
+  state.eqLine.setData(eq);
+  if(eq.length) state.eqChart.timeScale().fitContent();
+}
+
+function renderPerSymbol(rows){
+  if(!rows.length){ $('perSymbol').innerHTML='<div class="mut">no rows</div>'; return }
+  const cols=[['symbol','Symbol',0],['return_pct','Ret %',2],['max_dd_pct','DD %',2],
+              ['sharpe','Sharpe',2],['trades','N',0],['win_rate','Win',3],
+              ['profit_factor','PF',2],['avg_r','Avg R',3],['dsr','DSR',3]];
+  let h='<table><tr>'+cols.map(c=>`<th>${c[1]}</th>`).join('')+'</tr>';
+  for(const r of rows){
+    h+='<tr>'+cols.map(([k,,d])=>{
+      let v=r[k];
+      if(k==='symbol') return `<td>${v}</td>`;
+      if(v===null||v===undefined||Number.isNaN(v)) return '<td class="mut">—</td>';
+      if(k==='win_rate') v=v*100;
+      if(k==='trades') return `<td>${Math.round(v)}</td>`;
+      return `<td class="${cls(k==='max_dd_pct'?-v:v)}">${fmt(v,d)}</td>`;
+    }).join('')+'</tr>';
+  }
+  $('perSymbol').innerHTML=h+'</table>';
+}
+
+function renderBreakdown(m){
+  let h='';
+  const mk=(title,obj,keys)=>{
+    if(!obj||!Object.keys(obj).length) return '';
+    let s=`<div class="note" style="margin:8px 0 4px"><b>${title}</b></div><table><tr><th></th>`+
+          keys.map(k=>`<th>${k}</th>`).join('')+'</tr>';
+    for(const [name,d] of Object.entries(obj)){
+      s+=`<tr><td>${name}</td>`+keys.map(k=>{
+        const v=d[k];
+        if(v===null||v===undefined||Number.isNaN(v)) return '<td class="mut">—</td>';
+        if(k==='win_rate') return `<td>${fmt(v*100,1)}%</td>`;
+        if(k==='n') return `<td>${Math.round(v)}</td>`;
+        return `<td class="${cls(k==='pnl'||k==='avg_r'?v:0)}">${fmt(v,2)}</td>`;
+      }).join('')+'</tr>';
+    }
+    return s+'</table>';
+  };
+  h+=mk('By exit reason',m.exit_breakdown,['n','pnl','win_rate','avg_r']);
+  h+=mk('By setup tag',m.tag_breakdown,['n','pnl','win_rate','avg_r','expectancy']);
+  $('breakdown').innerHTML = h || '<div class="mut">no trades</div>';
+}
+
+// ------------------------------------------------------------------------ scan
+async function runScan(){
+  busy(true);
+  try{
+    const r = await api(`/api/scan?timeframe=${$('timeframe').value}`);
+    if(!r.rows.length){ $('scanTable').innerHTML='<div class="mut">no symbols scanned</div>'; return }
+    const pill=(s)=> s>0?'<span class="pill long">LONG</span>':
+                     s<0?'<span class="pill short">SHORT</span>':'<span class="pill flat">—</span>';
+    const trend=(t)=> t>0?'<span class="pos">up</span>':t<0?'<span class="neg">down</span>':'<span class="mut">flat</span>';
+    let h=`<div class="note" style="margin-bottom:8px">${r.live_signals} live signal(s) across
+           ${r.rows.length} symbols · strategy <code>${r.strategy}</code> · ${r.timeframe}</div>`;
+    h+='<table><tr><th>Symbol</th><th>Last</th><th>Chg%</th><th>Trend</th><th>ADX</th><th>RSI</th>'+
+       '<th>ATR%</th><th>Sweep</th><th>Age</th><th>Zone</th><th>Signal</th><th>R:R</th></tr>';
+    for(const x of r.rows){
+      // sweep_age is already the age on the side the trend filter wants (and
+      // null when the trend is flat), so don't re-derive it here.
+      const age = x.sweep_age!=null ? x.sweep_age
+                : (x.trend>0 ? x.bull_sweep_age : x.bear_sweep_age);
+      const zone = x.zones && x.zones!=='-' ? x.zones
+                 : ([x.in_fvg?'FVG':'',x.in_ob?'OB':''].filter(Boolean).join('+')||'');
+      h+=`<tr><td><b>${x.symbol}</b></td><td>${fmt(x.last,4)}</td>
+          <td class="${cls(x.change_pct)}">${fmt(x.change_pct,2)}</td>
+          <td>${trend(x.trend)}</td><td>${fmt(x.adx,1)}</td><td>${fmt(x.rsi,1)}</td>
+          <td>${fmt(x.atr_pct,2)}</td>
+          <td>${x.sweep==='bull'?'<span class="pos">bull</span>':x.sweep==='bear'?'<span class="neg">bear</span>':'<span class="mut">—</span>'}</td>
+          <td>${age==null?'—':Math.round(age)}</td>
+          <td>${zone||'<span class="mut">—</span>'}</td>
+          <td>${pill(x.signal)}</td><td>${x.rr==null?'—':fmt(x.rr,2)}</td></tr>`;
+    }
+    $('scanTable').innerHTML=h+'</table>';
+    for(const e of (r.errors||[]))
+      $('scanTable').insertAdjacentHTML('beforeend',`<div class="note">⚠ ${e.symbol}: ${e.error}</div>`);
+  }catch(e){ showErr('scanTable', e) } finally { busy(false) }
+}
+
+// ---------------------------------------------------------------------- report
+async function loadReport(){
+  busy(true);
+  try{
+    const r = await api('/api/report');
+    if(!r.available){
+      $('checks').innerHTML = `<div class="mut">${r.detail}</div>
+        <div class="note">Run <code>tvlab study --market ${state.cfg.market}</code> to generate one.</div>`;
+      return;
+    }
+    let h=`<div class="note" style="margin-bottom:8px">${r._path} · ${r._mtime}</div>`;
+    const la=r.lookahead||{};
+    h+='<div class="note"><b>Lookahead audit</b></div><table><tr><th>target</th><th>cols</th><th>leaks</th><th>ok</th></tr>';
+    for(const [k,v] of Object.entries(la)){
+      if(!v||typeof v!=='object'||v.columns_checked===undefined) continue;
+      h+=`<tr><td>${k}</td><td>${v.columns_checked}</td><td>${v.n_leaks}</td>
+          <td class="${v.ok?'pos':'neg'}">${v.ok?'OK':'LEAK'}</td></tr>`;
+    }
+    h+='</table>';
+    const rec=r.recovery||{};
+    if(Object.keys(rec).length){
+      h+='<div class="note" style="margin-top:10px"><b>Pattern recovery</b></div>'+
+         '<table><tr><th>detector</th><th>recall</th><th>precision</th><th>F1</th><th>eligible recall</th></tr>';
+      for(const [k,v] of Object.entries(rec)){
+        if(!v||v.recall===undefined) continue;
+        h+=`<tr><td>${k}</td><td>${fmt((v.recall||0)*100,1)}%</td>
+            <td>${fmt((v.precision||0)*100,1)}%</td><td>${fmt(v.f1,3)}</td>
+            <td>${v.eligible_recall==null?'—':fmt(v.eligible_recall*100,1)+'%'}</td></tr>`;
+      }
+      h+='</table>';
+    }
+    const nt=r.null_tests||{};
+    if(Object.keys(nt).length){
+      h+='<div class="note" style="margin-top:10px"><b>Null tests</b></div>'+
+         '<table><tr><th>test</th><th>actual</th><th>null mean</th><th>p</th><th>verdict</th></tr>';
+      for(const [k,v] of Object.entries(nt)){
+        if(!v||v.p_value===undefined) continue;
+        const ok = v.p_value!=null && v.p_value<0.05;
+        h+=`<tr><td>${k}</td><td>${fmt(v.actual,2)}</td><td>${fmt(v.null_mean,2)}</td>
+            <td>${v.p_value==null?'—':fmt(v.p_value,3)}</td>
+            <td class="${ok?'pos':'neg'}">${v.verdict||''}</td></tr>`;
+      }
+      h+='</table>';
+    }
+    const wf=r.walk_forward;
+    if(wf){
+      h+='<div class="note" style="margin-top:10px"><b>Walk-forward (OOS)</b></div><table>';
+      const rows=[['windows profitable',`${wf.windows_profitable}/${wf.n_windows}`],
+        ['OOS return',pct(wf.oos_return_pct)],['OOS max DD',pct(wf.oos_max_dd_pct)],
+        ['OOS Sharpe',fmt(wf.oos_sharpe)],['OOS profit factor',fmt(wf.oos_profit_factor)],
+        ['OOS trades',wf.oos_trades],['total trials',wf.total_trials],
+        ['mean OOS/IS efficiency',fmt(wf.mean_oos_efficiency,2)]];
+      for(const [k,v] of rows) h+=`<tr><td>${k}</td><td><b>${v}</b></td></tr>`;
+      h+='</table>';
+    }
+    const mc=r.monte_carlo;
+    if(mc && !mc.error){
+      h+='<div class="note" style="margin-top:10px"><b>Monte Carlo</b></div><table>';
+      h+=`<tr><td>P(final return &lt; 0)</td><td><b>${pct((mc.prob_loss||0)*100,1)}</b></td></tr>`;
+      for(const [k,v] of Object.entries(mc.ruin_probabilities||{}))
+        h+=`<tr><td>${k.replace('dd_exceeds_','P(DD ≥ ').replace('pct','%)')}</td><td>${pct(v*100,1)}</td></tr>`;
+      h+='</table>';
+    }
+    $('checks').innerHTML=h;
+  }catch(e){ showErr('checks', e) } finally { busy(false) }
+}
+
+boot();
+</script>
+</body>
+</html>

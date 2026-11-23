@@ -1,0 +1,34 @@
+# STYLE: swing
+#
+# 1h-4h swing. RECOMMENDED STARTING POINT: best signal-to-noise per unit of cost, tolerates realistic slippage, and needs only a few decisions a day.
+timeframe:
+  execution: 4h
+  bias: 1d
+  entry: 1h
+strategy:
+  name: smc_trend
+  params:
+    swing_length: 12
+    atr_period: 14
+    atr_stop_mult: 1.8
+    r_multiple: 2.5
+    bias_ema: 50
+    bias_adx_period: 14
+    bias_adx_min: 22
+    require_fvg: false
+    liquidity_sweep_lookback: 20
+    max_bars_in_trade: 90
+    bias_mode: ema_slope
+    entry_mode: sweep
+timeframe:
+  execution: 4h
+  bias: 1d
+  entry: 1h
+risk:
+  max_open_positions: 5
+  daily_loss_limit_pct: 0.02
+backtest:
+  max_bars_in_trade: 90
+walk_forward:
+  n_splits: 5
+  train_pct: 0.6

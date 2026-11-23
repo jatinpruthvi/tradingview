@@ -1,0 +1,52 @@
+# Runtime dependencies for tvlab.
+#
+# Install with:  python -m venv .venv && . .venv/bin/activate
+#                pip install -r requirements.txt
+#
+# The upper bounds below are load-bearing, not decorative. See the note on each.
+
+# ---------------------------------------------------------------- core numerics
+# pandas 3.x changed copy-on-write semantics and removed several alias
+# behaviours this code relies on (notably `.iloc` chained assignment patterns in
+# the backtester and `Series.to_frame` name handling). 2.3.x is the tested line.
+pandas>=2.1,<3
+# numpy 2.3+ tightened promotion rules around int64/float64 scalars, which breaks
+# the `np.int64(...) > 1` style comparisons in the indicator tests and the
+# pivot-index arithmetic in indicators/smc.py.
+numpy>=1.26,<2.3
+scipy>=1.11
+
+# ------------------------------------------------------------------- reporting
+matplotlib>=3.8
+# `DataFrame.to_markdown` needs tabulate; report.py falls back to `to_string`
+# without it, but the markdown reports read much better with real tables.
+tabulate>=0.9
+
+# ------------------------------------------------------------------- config/CLI
+PyYAML>=6.0
+click>=8.1
+rich>=13.0
+
+# ------------------------------------------------------------------- dashboard
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+
+# ----------------------------------------------------------------- persistence
+# Parquet cache under data/cache/. Without it the store falls back to pickle,
+# which is slower and not safe across pandas versions.
+pyarrow>=14.0
+
+# ------------------------------------------------- cross-validation / reference
+# Used ONLY by indicators/reference.py to cross-check our lag-safe SMC
+# implementation against the widely used reference. Note that the reference
+# implementation looks ahead (negative shifts) and must never be fed to the
+# backtester - see the docstring in indicators/reference.py.
+smartmoneyconcepts>=0.0.27
+
+# Optional TradingView scanner client. tvlab.screener guards every import, so
+# the package is not required to run backtests on your own data.
+tvscreener>=0.8
+
+# ---------------------------------------------------------------------- testing
+pytest>=8.0

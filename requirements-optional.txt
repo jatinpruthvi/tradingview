@@ -1,0 +1,38 @@
+# Optional: LIVE market data. Nothing in here is needed to develop, backtest or
+# validate - tvlab runs entirely on its deterministic synthetic generator or on
+# your own CSV/Parquet files without network access.
+#
+#   pip install -r requirements-optional.txt
+#
+# The adapters in src/tvlab/data/network_sources.py import these lazily and fail
+# loudly with the exact pip command if they are missing. They never silently
+# return an empty frame, because an empty frame would look like "no trades" and
+# quietly produce a flat, plausible-looking equity curve.
+
+# Crypto exchange data (Binance, Bybit, OKX, Coinbase, ...). This is the
+# recommended source for the crypto market config: it serves real 4h/1d bars, so
+# the higher-timeframe bias frame is genuinely the same series as the execution
+# bars rather than a resample.
+ccxt>=4.2
+
+# US equities, Indian equities (.NS/.BO), forex and metals via Yahoo Finance.
+# Free, unauthenticated, and adequate for daily bars. Intraday history is
+# limited to ~60 days, so it is not a good source for the intraday/hft styles.
+yfinance>=0.2.40
+
+# -----------------------------------------------------------------------------
+# A note on reproducibility
+#
+# Live sources are non-deterministic: the same symbol can return a different
+# number of bars tomorrow, and Yahoo occasionally revises history. That is why
+# every run records a config fingerprint and why the synthetic generator is the
+# default. If you want a study you can re-run exactly, download once and point
+# `data.source: csv` at the files:
+#
+#   tvlab data --market crypto --style swing --symbols BTC/USDT \
+#              --data-source ccxt --export data/live
+#   tvlab study --market crypto --style swing --data-source csv
+#
+# -----------------------------------------------------------------------------
+# pytrendline is installed in some environments for chart overlays but is NOT a
+# dependency of this project; nothing imports it.

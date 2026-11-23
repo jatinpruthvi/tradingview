@@ -1,0 +1,31 @@
+# us_equities market profile
+#
+# Commission-free retail routing: fee_bps covers SEC/FINRA fees only. Shorting costs (borrow) are NOT modelled - add them before trading shorts for real.
+#
+# Layered on top of config/default.yaml, then config/styles/<style>.yaml.
+universe:
+  market: us_equities
+  exchange: NASDAQ
+  quote_currency: USD
+  symbols:
+  - SPY
+  - QQQ
+  - NVDA
+  - AAPL
+  - MSFT
+  - AMZN
+  - META
+  - GOOGL
+  - JPM
+  - XOM
+  - AMD
+  - TSLA
+  min_quote_volume: 1000000
+  max_symbols: 12
+risk:
+  correlation_threshold: 0.65   # large caps vs their index
+  allow_short: true
+  max_leverage: 1.0
+costs:
+  fee_bps: 0.5
+  slippage_bps: 1.0

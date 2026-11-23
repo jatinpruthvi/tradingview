@@ -1,0 +1,34 @@
+# STYLE: intraday
+#
+# 1m-15m scalping. Highest trade count, so costs dominate: at 15bp round-trip you need >15bp of average gross edge per trade just to break even. Run the cost-sensitivity check in the report before believing any backtest here.
+timeframe:
+  execution: 5m
+  bias: 1h
+  entry: 1m
+strategy:
+  name: smc_trend
+  params:
+    swing_length: 8
+    atr_period: 14
+    atr_stop_mult: 1.2
+    r_multiple: 1.8
+    bias_ema: 50
+    bias_adx_period: 14
+    bias_adx_min: 20
+    require_fvg: true
+    liquidity_sweep_lookback: 12
+    max_bars_in_trade: 36
+    bias_mode: ema_slope
+    entry_mode: sweep
+timeframe:
+  execution: 5m
+  bias: 1h
+  entry: 1m
+risk:
+  max_open_positions: 3
+  daily_loss_limit_pct: 0.015
+backtest:
+  max_bars_in_trade: 36
+walk_forward:
+  n_splits: 6
+  train_pct: 0.65

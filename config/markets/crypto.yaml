@@ -1,0 +1,29 @@
+# crypto market profile
+#
+# 24/7 venue. fee_bps = taker fee (Binance spot 0.10%); slippage 5bp is realistic for majors in calm tape, optimistic in a liquidation cascade.
+#
+# Layered on top of config/default.yaml, then config/styles/<style>.yaml.
+universe:
+  market: crypto
+  exchange: binance
+  quote_currency: USDT
+  symbols:
+  - BTC/USDT
+  - ETH/USDT
+  - SOL/USDT
+  - BNB/USDT
+  - XRP/USDT
+  - ADA/USDT
+  - AVAX/USDT
+  - LINK/USDT
+  - DOGE/USDT
+  - DOT/USDT
+  min_quote_volume: 5000000
+  max_symbols: 20
+risk:
+  correlation_threshold: 0.6   # alts run 0.6-0.8 against each other; one bet, not ten
+  allow_short: true
+  max_leverage: 1.0
+costs:
+  fee_bps: 10.0
+  slippage_bps: 5.0

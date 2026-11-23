@@ -1,0 +1,19 @@
+# <upstream-url> <vendor-dir>
+https://github.com/heysanjeevv/market-lab market-lab
+https://github.com/tradingview/lightweight-charts lightweight-charts
+https://github.com/PyneSys/pynecore pynecore
+https://github.com/theonetrade/pynecore-strategies pynecore-strategies
+https://github.com/tradesdontlie/tradingview-mcp tradingview-mcp
+https://github.com/atilaahmettaner/tradingview-mcp tradingview-mcp-atila
+https://github.com/deepentropy/tvscreener tvscreener
+https://github.com/shner-elmo/TradingView-Screener tradingview-screener
+https://github.com/everget/tradingview-pinescript-indicators tradingview-pinescript-indicators
+https://github.com/klinecharts/KLineChart klinechart
+https://github.com/ednunezg/pytrendline pytrendline
+https://github.com/koala73/worldmonitor worldmonitor
+https://github.com/visualHFT/VisualHFT visualhft
+https://github.com/freqtrade/freqtrade freqtrade
+https://github.com/joshyattridge/smart-money-concepts smart-money-concepts
+https://github.com/nickmccullum/algorithmic-trading-python algorithmic-trading-python
+https://github.com/Cursivez/journalit journalit
+https://github.com/kadoa-org/congress-trading-monitor congress-trading-monitor

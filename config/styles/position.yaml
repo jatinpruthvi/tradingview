@@ -1,0 +1,29 @@
+# STYLE: position
+#
+# Daily trend-following. Few trades, so per-trade statistics are weak - expect wide confidence intervals and lean on the Monte Carlo output rather than point estimates.
+timeframe:
+  execution: 1d
+  bias: 1w
+  entry: null
+strategy:
+  name: donchian_breakout
+  params:
+    donchian_period: 55
+    exit_period: 20
+    atr_period: 20
+    atr_stop_mult: 3.0
+    r_multiple: 4.0
+    bias_ema: 200
+    bias_adx_period: 14
+    bias_adx_min: 18
+    trend_ema: 50
+    max_bars_in_trade: 120
+risk:
+  max_open_positions: 8
+  daily_loss_limit_pct: 0.02
+  max_position_pct: 0.2
+backtest:
+  max_bars_in_trade: 120
+walk_forward:
+  n_splits: 4
+  train_pct: 0.7
