@@ -466,9 +466,31 @@ async function runSuggest(){
             compare these breakeven thresholds against.</div>`;
     }
 
+    // "Nothing qualifies" is a claim about the market, and it is only licensed if
+    // the market was actually observed. When every symbol failed to load, scanned
+    // is 0 and the honest answer is "we could not look" - the same distinction the
+    // CLI makes, and the same reason: the reassuring wording reads as a legitimate
+    // quiet market and hides a network outage.
+    const failed = (r.errors||[]).length;
+    if(!r.scanned && failed){
+      h += `<div class="err" style="margin-bottom:8px"><b>Nothing was scanned — this is a
+            data failure, not a market verdict.</b><br>All ${failed} symbol(s) failed to
+            load, so no suggestion is possible until bars arrive.</div>`;
+      for(const e of r.errors.slice(0,5))
+        h += `<div class="note"><b>${escapeHtml(e.symbol)}</b> — ${escapeHtml(e.error)}</div>`;
+      if(failed > 5) h += `<div class="note mut">… and ${failed-5} more</div>`;
+      h += `<div class="note" style="margin-top:8px">Check the source and network route:
+            <code>tvlab data --market ${r.market} --data-source ${state.cfg.data_source||''}
+            --limit 50</code></div>`;
+      $('suggestTable').innerHTML = h;
+      return;
+    }
+
     if(!r.candidates.length){
       h += `<div class="note">Nothing qualifies right now. This is the normal state
-            of a market, not a failure of the scan.</div>`;
+            of a market, not a failure of the scan.`
+        + (failed ? ` <span class="mut">(based on ${r.scanned} of ${r.scanned+failed}
+            symbols — ${failed} failed to load)</span>` : '') + `</div>`;
       for(const x of (r.rejected||[]))
         h += `<div class="note" style="margin-top:6px"><b>${x.symbol}</b> rejected —
               ${x.reasons.map(e=>escapeHtml(e)).join('; ')}</div>`;

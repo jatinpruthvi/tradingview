@@ -133,7 +133,8 @@ requires_node = pytest.mark.skipif(node is None, reason="node is not installed")
 
 
 @requires_node
-@pytest.mark.parametrize("case", ["populated", "empty", "no_study"])
+@pytest.mark.parametrize("case", ["populated", "empty", "no_study",
+                                  "data_failure", "partial_failure"])
 def test_runSuggest_renders_without_throwing(case, suggest_payload, script_body, tmp_path):
     """Actually execute the renderer. The populated branch cannot be reached with
     synthetic data - no strategy reliably fires on the final bar - so it would
@@ -144,6 +145,14 @@ def test_runSuggest_renders_without_throwing(case, suggest_payload, script_body,
         payload["n_candidates"] = 0
     elif case == "no_study":
         payload["measured"] = None
+    elif case == "data_failure":
+        # every symbol failed to load: nothing was observed, so no market verdict
+        payload.update(candidates=[], n_candidates=0, rejected=[], scanned=0,
+                       errors=[{"symbol": f"S{i}.NS", "error": "DataError: unreachable"}
+                               for i in range(9)])
+    elif case == "partial_failure":
+        payload.update(candidates=[], n_candidates=0, scanned=4,
+                       errors=[{"symbol": "DEAD.NS", "error": "DataError: unreachable"}])
 
     js = script_body
     assert js.count("\nboot();") == 1, "boot() invocation moved; update the strip"
@@ -173,6 +182,7 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
     assert r.returncode == 0, f"node crashed: {r.stderr[:800]}"
 
     out = r.stdout
+    flat = re.sub(r"\s+", " ", out)     # what a browser would render as text
     assert not out.strip().startswith('<div class="err">'), f"hit the error path: {out[:200]}"
     for junk in ("undefined", "NaN", "__PAYLOAD__"):
         assert junk not in out, f"{junk!r} leaked into the rendered HTML"
@@ -183,8 +193,25 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
             assert probe in out, f"{probe!r} missing from the populated render"
     elif case == "empty":
         assert "Nothing qualifies" in out
-    else:
+    elif case == "no_study":
         assert "no previous study" in out
+    elif case == "data_failure":
+        # The point of the branch: a total data failure must not present itself as
+        # a quiet market. Assert the reassuring wording is ABSENT, not just that the
+        # new wording is present - the old text could otherwise be printed too.
+        assert "data failure, not a market verdict" in out
+        assert "Nothing qualifies" not in out
+        assert "normal state" not in out
+        assert "All 9 symbol(s) failed to load" in flat
+        assert "and 4 more" in flat, "should truncate rather than dump every error"
+        assert "tvlab data --market" in out, "must give a concrete next step"
+        assert 'class="err"' in out, "should use the error styling, not a muted note"
+    elif case == "partial_failure":
+        # A partial view must not present itself as a complete one, but it is still
+        # a legitimate observation, so the verdict stays.
+        assert "Nothing qualifies" in out
+        assert "data failure" not in out
+        assert "based on 4 of 5 symbols" in flat, "must state the coverage it had"
 
 
 @requires_node
