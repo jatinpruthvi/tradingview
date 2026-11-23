@@ -147,6 +147,113 @@ tvlab study --market forex --style intraday \
 
 ---
 
+## Running it on live data
+
+Everything above runs on synthetic bars. This is the part that needs a machine
+with network access — **and none of it was verified from the environment this was
+built in**, which has no route to NSE, Yahoo, `scanner.tradingview.com` or any
+exchange. The adapters are written against documented endpoint behaviour and
+tested against reconstructed payloads. Treat the first live run as the real test.
+
+```bash
+pip install -r requirements-optional.txt     # ccxt, yfinance, pynesys-pynecore
+```
+
+| Market | Source | Command |
+|:-------|:-------|:--------|
+| crypto | `ccxt` | `tvlab study --market crypto --style swing --data-source ccxt` |
+| us_equities | `yfinance` | `tvlab study --market us_equities --style swing --data-source yfinance` |
+| indian_equities | `nse` | `tvlab study --market indian_equities --style swing --data-source nse` |
+| forex | `yfinance` | `tvlab study --market forex --style swing --data-source yfinance` |
+| any | your own files | `tvlab study --data-source csv` after `tvlab data --export data/live` |
+
+### Fetching once, then studying offline
+
+`--data-source csv` reads a directory of per-symbol files, which is how you fetch
+live bars once and then iterate without hammering an exchange:
+
+```bash
+tvlab data  --market crypto --style swing --data-source ccxt --export data/live
+tvlab study --market crypto --style swing --data-source csv
+```
+
+`data/live` is the default for `data.csv_root`, so those two commands line up with
+no extra flag. Point it elsewhere with `--set data.csv_root=/path/to/bars`; relative
+paths resolve against the repo root, not the process working directory, so the same
+config behaves identically from a shell, a cron job and the dashboard.
+
+Accepted layouts:
+
+- `<root>/BTC_USDT_4h.parquet` — what `--export` writes. Symbol separators are
+  flattened and the `_<timeframe>` suffix is optional; where several timeframes are
+  present the requested one wins.
+- `<root>/BTC_USDT.csv` (also `.parquet`, `.pq`, `.json`, `.jsonl`)
+- one long file with a `symbol` column
+
+Exporting only the execution timeframe is fine: when the higher timeframe the trend
+filter wants is not on disk, `bias_frame()` resamples it up from the execution bars
+and says so in the log. That is a fallback, not an error — but note it means the
+bias is derived from the same bars, so it is a weaker filter than native
+higher-timeframe data. Fetch the bias timeframe too if you can.
+
+### Indian equities specifically
+
+`--data-source nse` needs **no API key**. The NSE endpoints only require a
+`User-Agent` header, which `src/tvlab/data/nse.py` sets. But NSE publishes no
+history endpoint, so bars come from Yahoo's chart API — Indian cash symbols need
+the `.NS` suffix, which `yahoo_symbol()` adds for you.
+
+Before the open, these answer the questions that decide whether there is anything
+to trade at all:
+
+```bash
+tvlab nse session      # is the cash market open, and for how much longer?
+tvlab nse breadth      # advances vs declines across every NSE index
+tvlab nse liquidity    # the most tradeable names right now, by traded VALUE
+tvlab nse universe     # live Nifty 500 + F&O membership
+tvlab nse holidays     # upcoming trading holidays
+```
+
+`breadth` matters more than it looks: `allow_short` is `false` in
+`config/markets/indian_equities.yaml`, so on a day when declines outnumber
+advances **there is no trade for this configuration to take**. That is a fact
+about the mandate, not a failure of the scan.
+
+### What a network failure looks like
+
+`tvlab scan` and `tvlab suggest` distinguish three outcomes, because collapsing
+them is how a data outage gets mistaken for a quiet market:
+
+| Situation | Output | Exit |
+|:----------|:-------|:-----|
+| every symbol failed to load | `this is a data failure, not a market verdict`, first five errors, a retry command | **2** |
+| some loaded, none fired | the market verdict, qualified with `(based on 4 of 5 symbols — the rest failed to load)` | 0 |
+| all loaded, none fired | `Nothing qualifies. … This is the normal state.` | 0 |
+
+Exit code 2 is there so a script or a cron job can tell the difference without
+parsing prose.
+
+### The order to do things in
+
+```bash
+tvlab data    --market indian_equities --data-source nse --limit 50   # 1. do bars load at all?
+tvlab study   --market indian_equities --style swing --data-source nse # 2. is the edge validated?
+tvlab suggest --market indian_equities --style swing --data-source nse # 3. only then, what to trade
+```
+
+Skipping step 2 is the mistake this tool exists to prevent. `suggest` will happily
+rank ideas on data that has never been validated, which is why it prints the
+measured win rate from your last `study` next to every breakeven threshold — and
+says `no previous study` when there isn't one.
+
+One hard limit worth knowing before you try the intraday style: Yahoo serves 1m
+bars for roughly 8 days and 5m–90m bars for the last **60 days**. Sixty days is
+about 40 sessions, and the intraday style's walk-forward wants 6 splits. An
+intraday edge on Indian large caps is therefore not validatable on free data — you
+would need a paid history source. Daily bars are unaffected.
+
+---
+
 ## What it does
 
 ```

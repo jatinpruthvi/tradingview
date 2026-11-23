@@ -72,6 +72,34 @@ def _series_drift(bias_df: pd.DataFrame, exec_df: pd.DataFrame,
         return None
 
 
+def _csv_root(cfg: "AppConfig") -> Path:
+    """Resolve `data.csv_root`, with a fallback to the historical location.
+
+    Relative paths resolve against the repo root rather than the process CWD, so
+    the same config works from a script, a cron job and the dashboard. The old
+    hardcoded `<cache_dir>/csv` is still honoured if it exists and the configured
+    root does not, so an existing setup keeps loading after the upgrade instead of
+    failing on a path it never chose.
+    """
+    configured = Path(cfg.data.csv_root)
+    if not configured.is_absolute():
+        configured = REPO_ROOT / configured
+    if configured.exists():
+        return configured
+
+    legacy = Path(cfg.data.cache_dir)
+    if not legacy.is_absolute():
+        legacy = REPO_ROOT / legacy
+    legacy = legacy / "csv"
+    if legacy.exists():
+        log.warning("data.csv_root=%s does not exist; falling back to the legacy "
+                    "location %s. Set data.csv_root to where your bars actually are.",
+                    configured, legacy)
+        return legacy
+
+    return configured      # let CsvSource raise, naming the path it wanted
+
+
 class DataStore:
     def __init__(self, cfg: AppConfig, root: Optional[Path] = None):
         self.cfg = cfg
@@ -90,7 +118,7 @@ class DataStore:
         if name == "synthetic":
             src = _SyntheticAdapter(self.cfg)
         elif name == "csv":
-            src = CsvSource(self.root / "csv")
+            src = CsvSource(_csv_root(self.cfg))
         elif name in ("ccxt", "exchange"):
             from .network_sources import CcxtSource
 

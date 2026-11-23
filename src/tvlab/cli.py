@@ -177,6 +177,13 @@ def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional
     need a 26.7% win rate" is just arithmetic; next to "you measured 38.5%, but
     on 13 trades" it is an answer - and the sample size is the part that stops it
     being over-read.
+
+    Returns ``None`` only when no report file exists at all. A report that ran but
+    produced no trades returns ``status="no_trades"`` - collapsing that into "no
+    previous study" tells someone to re-run a study they already ran, and hides the
+    one thing that run actually learned.
+
+    ``status`` is one of ``ok`` | ``no_trades`` | ``corrupt``.
     """
     import json
 
@@ -190,18 +197,23 @@ def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional
             continue
         try:
             d = json.loads(path.read_text())
-        except Exception:  # noqa: BLE001 - a corrupt report must not kill the scan
-            continue
+        except Exception as exc:  # noqa: BLE001 - a corrupt report must not kill the scan
+            return {"status": "corrupt", "win_rate": None, "n_trades": 0, "path": str(path),
+                    "error": f"{type(exc).__name__}: {exc}"}
         pm = d.get("portfolio_metrics") or {}
         wr, n = pm.get("win_rate"), pm.get("n_trades")
-        if wr is None or not np.isfinite(wr):
-            continue
-        return {
-            "win_rate": float(wr), "n_trades": int(n or 0),
+        base = {
             "payoff_ratio": pm.get("payoff_ratio"), "expectancy": pm.get("expectancy"),
             "profit_factor": pm.get("profit_factor"),
             "path": str(path), "created_at": d.get("created_at"),
         }
+        if wr is None or not np.isfinite(wr):
+            # A real study that took no trades. `smc_trend` is deliberately rare, so
+            # on a short sample or a small universe this is a normal outcome - and
+            # an informative one.
+            return {**base, "status": "no_trades", "win_rate": None,
+                    "n_trades": int(n or 0)}
+        return {**base, "status": "ok", "win_rate": float(wr), "n_trades": int(n or 0)}
     return None
 
 
@@ -270,7 +282,19 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
                   f"max breakeven {max_breakeven * 100:.0f}%")
 
     measured = _measured_win_rate(cfg, strat.name)
-    if measured:
+    status = (measured or {}).get("status")
+    if status is None and measured is not None:
+        # Defensive: the dashboard round-trips this dict through JSON and tests
+        # build it by hand, so a missing status must not silently demote a real
+        # measurement to "no previous study". Infer it from the win rate.
+        status = "ok" if measured.get("win_rate") is not None else "no_trades"
+    # A non-empty `measured` dict is NOT the same as having a win rate: the
+    # no_trades and corrupt statuses both carry a path and a message but
+    # win_rate=None. Every comparison against it has to go through this flag,
+    # or `None > float` raises a TypeError on exactly the path that only appears
+    # when there are candidates AND the last study took no trades.
+    has_measured = status == "ok"
+    if status == "ok":
         n = measured["n_trades"]
         caveat = ("[red]far too few trades to trust[/red]" if n < 30
                   else "[yellow]thin sample[/yellow]" if n < 100 else "adequate sample")
@@ -278,6 +302,21 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
         console.print(f"  measured on the last study: win rate "
                       f"[bold]{measured['win_rate'] * 100:.1f}%[/bold] over {n} trades ({caveat})"
                       + (f", profit factor {pf:.2f}" if pf else ""))
+        console.print(f"  [dim]{measured['path']}[/dim]")
+    elif status == "no_trades":
+        # A study ran and took no trades. That is an answer, not an absence of one:
+        # there is no win rate to compare the breakeven thresholds against, and
+        # saying "no previous study" would send the user to re-run what they ran.
+        console.print("  [yellow]the last study took [bold]no trades[/bold], so there is no "
+                      "measured win rate to compare these breakeven thresholds "
+                      "against.[/yellow]")
+        console.print("  [dim]Widen the universe, lengthen the history, or accept that this "
+                      "setup does not fire here. `smc_trend` is deliberately rare.[/dim]")
+        console.print(f"  [dim]{measured['path']}[/dim]")
+    elif status == "corrupt":
+        console.print(f"  [red]the last study report is unreadable "
+                      f"({measured.get('error', 'unknown error')}); re-run "
+                      f"`tvlab study`.[/red]")
         console.print(f"  [dim]{measured['path']}[/dim]")
     else:
         console.print("  [yellow]no previous study for this market/style - run "
@@ -333,7 +372,7 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
         be = c.breakeven_win_rate
         be_colour = "green" if be < 0.30 else ("yellow" if be < 0.45 else "red")
         marker = ""
-        if measured:
+        if has_measured:
             marker = " [green]PASS[/green]" if measured["win_rate"] > be else " [red]FAIL[/red]"
         t.add_row(
             str(i), c.symbol, c.side, f"{c.rr:.2f}",
@@ -357,7 +396,7 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
         console.print(f"  [green]+[/green] {r}")
     for w in best.warnings:
         console.print(f"  [yellow]![/yellow] {w}")
-    if measured:
+    if has_measured:
         gap = (measured["win_rate"] - best.breakeven_win_rate) * 100
         verdict = ("clears it" if gap > 0 else "does NOT clear it")
         console.print(f"  [bold]measured {measured['win_rate'] * 100:.1f}% vs breakeven "

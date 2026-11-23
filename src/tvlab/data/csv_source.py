@@ -8,12 +8,13 @@ because every vendor spells them differently.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 
-from .base import slice_range, validate_ohlcv
+from .base import DataError, slice_range, validate_ohlcv
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,11 @@ class CsvSource:
         self.root = Path(root)
         self.symbol_column = symbol_column
         if not self.root.exists():
-            raise FileNotFoundError(f"CSV data root does not exist: {self.root}")
+            raise DataError(
+                f"CSV data root does not exist: {self.root}. Export bars there with "
+                f"`tvlab data --export {self.root}`, or point data.csv_root at the "
+                f"directory that holds them."
+            )
         self._long: Optional[pd.DataFrame] = None
         if self.root.is_file():
             self._long = self._read_one(self.root)
@@ -60,7 +65,7 @@ class CsvSource:
         end: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> pd.DataFrame:
-        df = self._frame_for(symbol)
+        df = self._frame_for(symbol, timeframe)
         df = validate_ohlcv(df, symbol)
         return slice_range(df, start, end, limit)
 
@@ -69,28 +74,37 @@ class CsvSource:
             col = self.symbol_column or _guess_symbol_column(self._long)
             if col:
                 return sorted(map(str, self._long[col].dropna().unique()))
-        return sorted(p.stem for p in self.root.glob("*") if p.suffix.lower() in
-                      {".csv", ".parquet", ".pq", ".jsonl", ".json"})
+        out = set()
+        for p in self.root.glob("*"):
+            if p.suffix.lower() not in {".csv", ".parquet", ".pq", ".jsonl", ".json"}:
+                continue
+            out.add(_TF_SUFFIX.sub("", p.stem))
+        return sorted(out)
 
     # ----------------------------------------------------------------- private
-    def _frame_for(self, symbol: str) -> pd.DataFrame:
+    def _frame_for(self, symbol: str, timeframe: Optional[str] = None) -> pd.DataFrame:
         if self._long is not None:
             col = self.symbol_column or _guess_symbol_column(self._long)
             if not col:
                 raise ValueError("long-format CSV has no symbol column; pass symbol_column=")
             sub = self._long[self._long[col].astype(str) == str(symbol)]
             if sub.empty:
-                raise KeyError(f"symbol {symbol!r} not present in {self.root}")
+                raise DataError(f"symbol {symbol!r} not present in {self.root}")
             return sub.drop(columns=[c for c in (col,) if c != "timestamp"])
 
-        for cand in _symbol_filenames(symbol):
+        cands = _symbol_filenames(symbol)
+        if timeframe:
+            # Prefer the exact timeframe, then fall back to any file for the symbol.
+            cands = [f"{c}_{timeframe}" for c in cands] + cands
+        for cand in cands:
             for ext in (".csv", ".parquet", ".pq", ".jsonl", ".json"):
                 p = self.root / f"{cand}{ext}"
                 if p.exists():
                     return self._read_one(p)
-        raise KeyError(
-            f"no file for symbol {symbol!r} under {self.root} "
-            f"(tried {_symbol_filenames(symbol)}); available: {self.list_symbols()[:20]}"
+        raise DataError(
+            f"no {timeframe or ''} bars for symbol {symbol!r} under {self.root} "
+            f"(tried {[f'{c}{e}' for c in cands[:5] for e in ('.csv', '.parquet')][:6]}); "
+            f"available: {self.list_symbols()[:20]}"
         )
 
     @staticmethod
@@ -135,15 +149,32 @@ def _guess_symbol_column(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+#: A trailing ``_4h`` / ``_1d`` / ``_15m`` on a filename. `tvlab data --export`
+#: appends the timeframe so one directory can hold several; matching has to allow
+#: for it, and list_symbols() has to strip it or the universe reports symbols that
+#: no config will ever name.
+_TF_SUFFIX = re.compile(r"_\d+[smhdwSMHDW]$", re.IGNORECASE)
+
+
 def _symbol_filenames(symbol: str) -> List[str]:
-    """Candidate filenames for a symbol, handling / : and . separators."""
+    """Candidate filenames for a symbol, handling / : and . separators.
+
+    Includes the *underscore*-flattened form (``BTC/USDT`` -> ``BTC_USDT``), which
+    is what ``tvlab data --export`` writes: it replaces every non-alphanumeric
+    character with ``_``. Without it the export -> ``--data-source csv`` round trip
+    cannot find its own files, and the failure surfaces as
+    "no symbol produced a result" far from the cause.
+    """
     flat = symbol.replace("/", "-").replace(":", "-")
     nosuffix = symbol.split(":")[0]
     dotted = symbol.replace("/", ".")
     plain = symbol.replace("/", "")
     base = nosuffix.replace("/", "-")
+    underscore = "".join(ch if ch.isalnum() else "_" for ch in symbol)
+    underscore_base = "".join(ch if ch.isalnum() else "_" for ch in nosuffix)
     seen, out = set(), []
-    for cand in (symbol, flat, dotted, plain, base, nosuffix, base.split(".")[0]):
+    for cand in (symbol, flat, dotted, plain, base, nosuffix, base.split(".")[0],
+                 underscore, underscore_base):
         if cand and cand not in seen:
             seen.add(cand)
             out.append(cand)

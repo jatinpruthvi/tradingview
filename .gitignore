@@ -45,3 +45,6 @@ workdir/
 scripts/vendor_xval_indicator.csv
 scripts/vendor_xval_indicator.toml
 *.ohlcv
+# Fetched/exported bars. `data/live` is the default data.csv_root, so this is where
+# `tvlab data --export` puts live bars - large, machine-specific and reproducible.
+data/live/

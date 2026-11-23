@@ -154,11 +154,19 @@ class MonteCarloConfig:
 
 @dataclass(frozen=True)
 class DataConfig:
-    #: synthetic | csv | ccxt | yfinance | tvscreener
+    #: synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart
     source: str = "synthetic"
     cache_dir: str = "data/cache"
     synthetic_bars: int = 4_000
     synthetic_seed: int = 20261123
+    #: Where `--data-source csv` reads bars from. Relative paths resolve against
+    #: the repo root. This is the directory `tvlab data --export PATH` writes to,
+    #: so the export -> study round trip is one flag instead of a file move.
+    #:
+    #: It used to be hardcoded to `<cache_dir>/csv`, i.e. *inside the cache*, which
+    #: meant it could not be pointed anywhere else, did not exist on a fresh clone,
+    #: and was deleted whenever the cache was cleared.
+    csv_root: str = "data/live"
 
 
 @dataclass(frozen=True)

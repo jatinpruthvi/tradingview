@@ -452,19 +452,38 @@ async function runSuggest(){
     // decision. It comes from the last study, so its sample size is stated too:
     // 38% over 13 trades is not 38%.
     const m = r.measured;
-    if(m && m.win_rate!=null){
+    // Three states, not two. A study that ran and took no trades used to fall into
+    // the "no previous study" branch, which tells the user to re-run what they
+    // already ran and hides the one thing that run learned. `status` may be absent
+    // on an older payload, so infer it from the win rate rather than trusting it.
+    const mStatus = m ? (m.status || (m.win_rate!=null ? 'ok' : 'no_trades')) : null;
+    if(mStatus === 'ok'){
       const n = m.n_trades||0;
       const trust = n<30 ? 'far too few trades to trust'
                   : n<100 ? 'thin sample' : 'adequate sample';
       h += `<div class="note" style="margin-bottom:10px">measured on the last study:
             win rate <b>${fmt(m.win_rate*100,1)}%</b> over ${n} trades
             (${trust})${m.profit_factor!=null?` · profit factor ${fmt(m.profit_factor,2)}`:''}
-            <br><span class="mut">${m.path||''}</span></div>`;
+            <br><span class="mut">${escapeHtml(m.path||'')}</span></div>`;
+    } else if(mStatus === 'no_trades'){
+      h += `<div class="note" style="margin-bottom:10px">the last study took
+            <b>no trades</b>, so there is no measured win rate to compare these
+            breakeven thresholds against. Widen the universe or lengthen the
+            history — <code>${escapeHtml(r.strategy||'this setup')}</code> is
+            deliberately rare.
+            <br><span class="mut">${escapeHtml(m.path||'')}</span></div>`;
+    } else if(mStatus === 'corrupt'){
+      h += `<div class="note" style="margin-bottom:10px">the last study report is
+            unreadable (${escapeHtml(m.error||'unknown error')}) — re-run
+            <code>tvlab study --market ${escapeHtml(r.market||'')}</code>.
+            <br><span class="mut">${escapeHtml(m.path||'')}</span></div>`;
     } else {
       h += `<div class="note" style="margin-bottom:10px">no previous study on record —
-            run <code>tvlab study --market ${r.market}</code> to get a win rate to
-            compare these breakeven thresholds against.</div>`;
+            run <code>tvlab study --market ${escapeHtml(r.market||'')}</code> to get a
+            win rate to compare these breakeven thresholds against.</div>`;
     }
+    // Only an actual measurement licenses the PASS/FAIL comparison below.
+    const measuredWinRate = (mStatus === 'ok') ? m.win_rate : null;
 
     // "Nothing qualifies" is a claim about the market, and it is only licensed if
     // the market was actually observed. When every symbol failed to load, scanned
@@ -508,7 +527,7 @@ async function runSuggest(){
 
     r.candidates.forEach((x,i)=>{
       // PASS means the strategy's own recorded win rate clears what this idea needs.
-      const pass = (m && m.win_rate!=null) ? m.win_rate > x.breakeven_win_rate : null;
+      const pass = (measuredWinRate!=null) ? measuredWinRate > x.breakeven_win_rate : null;
       const verdict = pass===null ? '<span class="mut">no study</span>'
                     : pass ? '<span class="pill long">PASS</span>'
                            : '<span class="pill short">FAIL</span>';

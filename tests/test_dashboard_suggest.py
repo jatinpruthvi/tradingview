@@ -118,12 +118,36 @@ def test_verdict_survives_serialisation():
     assert "verdict" in d and d["verdict"] == c.verdict
 
 
-def test_measured_none_is_a_shape_the_js_handles(suggest_payload, script_body):
-    """The 'no previous study' branch reads no fields off `measured`, so a null
-    must not reach an `m.win_rate` dereference."""
+def test_measured_is_never_dereferenced_without_a_guard(script_body):
+    """`measured` is null when no study has run, and carries win_rate=null in the
+    no_trades and corrupt states. Every use has to tolerate both.
+
+    This asserts the safety property rather than a particular source shape. An
+    earlier version pinned the literal string `if(m && m.win_rate!=null)` and broke
+    the moment that guard was rewritten into the clearer `mStatus` derivation, with
+    nothing actually becoming less safe. A positional scan is also wrong here: the
+    derivation itself reads `m.win_rate`, safely, inside its own null check.
+
+    The property that matters is that the PASS/FAIL comparison is driven by a value
+    that is null unless the status is `ok`.
+    """
     body = _suggest_fn(script_body)
-    assert "if(m && m.win_rate!=null)" in body or "m && m.win_rate" in body, \
-        "measured is dereferenced without a null guard"
+
+    # 1. the status is derived through a null check on `m` itself
+    assert re.search(r"const mStatus = m \?", body), \
+        "measured status is not derived through a null check on m"
+
+    # 2. the comparable win rate exists only in the ok state
+    m = re.search(r"const measuredWinRate = \(mStatus === 'ok'\) \? m\.win_rate : null",
+                  body)
+    assert m, "measuredWinRate is not gated on mStatus === 'ok'"
+
+    # 3. and the verdict uses that gated value, never the raw field
+    assert re.search(r"const pass = \(measuredWinRate!=null\)", body), \
+        "the PASS/FAIL verdict does not go through the gated win rate"
+    after = body[m.end():]
+    assert not re.search(r"m\.win_rate\s*>", after), \
+        "m.win_rate is compared directly somewhere after the gate"
 
 
 # ---------------------------------------------------------------- render harness
@@ -134,7 +158,9 @@ requires_node = pytest.mark.skipif(node is None, reason="node is not installed")
 
 @requires_node
 @pytest.mark.parametrize("case", ["populated", "empty", "no_study",
-                                  "data_failure", "partial_failure"])
+                                  "data_failure", "partial_failure",
+                                  "study_no_trades", "study_corrupt",
+                                  "status_inferred"])
 def test_runSuggest_renders_without_throwing(case, suggest_payload, script_body, tmp_path):
     """Actually execute the renderer. The populated branch cannot be reached with
     synthetic data - no strategy reliably fires on the final bar - so it would
@@ -153,6 +179,17 @@ def test_runSuggest_renders_without_throwing(case, suggest_payload, script_body,
     elif case == "partial_failure":
         payload.update(candidates=[], n_candidates=0, scanned=4,
                        errors=[{"symbol": "DEAD.NS", "error": "DataError: unreachable"}])
+    elif case == "study_no_trades":
+        payload["measured"] = {"status": "no_trades", "win_rate": None, "n_trades": 0,
+                               "path": "output/x/report.json"}
+    elif case == "study_corrupt":
+        payload["measured"] = {"status": "corrupt", "win_rate": None, "n_trades": 0,
+                               "path": "output/x/report.json",
+                               "error": "JSONDecodeError: Expecting value"}
+    elif case == "status_inferred":
+        # an older payload with no `status` key must still be read as a measurement
+        payload["measured"] = {"win_rate": 0.62, "n_trades": 300, "profit_factor": 1.6,
+                               "path": "output/x/report.json"}
 
     js = script_body
     assert js.count("\nboot();") == 1, "boot() invocation moved; update the strip"
@@ -182,7 +219,12 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
     assert r.returncode == 0, f"node crashed: {r.stderr[:800]}"
 
     out = r.stdout
-    flat = re.sub(r"\s+", " ", out)     # what a browser would render as text
+    # What a browser actually shows: markup removed, whitespace collapsed. The
+    # template literals both wrap across source lines and interleave <b>/<span>
+    # tags mid-sentence, so prose assertions have to run against the rendered text
+    # rather than the raw HTML - otherwise "took no trades" fails on the <b> that
+    # sits between the two words. Structural assertions still use `out`.
+    flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", out))
     assert not out.strip().startswith('<div class="err">'), f"hit the error path: {out[:200]}"
     for junk in ("undefined", "NaN", "__PAYLOAD__"):
         assert junk not in out, f"{junk!r} leaked into the rendered HTML"
@@ -200,8 +242,8 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
         # a quiet market. Assert the reassuring wording is ABSENT, not just that the
         # new wording is present - the old text could otherwise be printed too.
         assert "data failure, not a market verdict" in out
-        assert "Nothing qualifies" not in out
-        assert "normal state" not in out
+        assert "Nothing qualifies" not in flat
+        assert "normal state" not in flat
         assert "All 9 symbol(s) failed to load" in flat
         assert "and 4 more" in flat, "should truncate rather than dump every error"
         assert "tvlab data --market" in out, "must give a concrete next step"
@@ -212,6 +254,23 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
         assert "Nothing qualifies" in out
         assert "data failure" not in out
         assert "based on 4 of 5 symbols" in flat, "must state the coverage it had"
+    elif case == "study_no_trades":
+        # The distinction that motivated the change: a study that ran and took no
+        # trades must not be reported as "no previous study", which would tell the
+        # user to re-run what they already ran.
+        assert "took no trades" in flat
+        assert "no previous study" not in flat
+        # and with no win rate there is no PASS/FAIL verdict to give
+        assert "PASS" not in out and "FAIL" not in out
+    elif case == "study_corrupt":
+        assert "unreadable" in flat
+        assert "JSONDecodeError" in flat
+        assert "no previous study" not in flat
+    elif case == "status_inferred":
+        assert "62.0%" in out
+        assert "adequate sample" in flat
+        assert "PASS" in out, "a real measurement must license the comparison"
+        assert "no previous study" not in flat
 
 
 @requires_node

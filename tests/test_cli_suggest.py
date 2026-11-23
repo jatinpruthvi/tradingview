@@ -195,7 +195,7 @@ def test_suggest_compares_breakeven_against_the_measured_win_rate(runner, patch_
     win rate, next to the win rate the idea needs."""
     patch_scan([_row("WIDE", last=100.0, stop=98.0, target=104.0)])
     monkeypatch.setattr("tvlab.cli._measured_win_rate",
-                        lambda cfg, name: {"win_rate": 0.55, "n_trades": 400,
+                        lambda cfg, name: {"status": "ok", "win_rate": 0.55, "n_trades": 400,
                                            "profit_factor": 1.4, "path": "x.json",
                                            "created_at": None})
     out = _flat(runner.invoke(cli, ["suggest", "--market", "crypto", "--style", "swing"]).output)
@@ -208,7 +208,7 @@ def test_suggest_compares_breakeven_against_the_measured_win_rate(runner, patch_
 def test_suggest_flags_when_the_measured_rate_does_not_clear_it(runner, patch_scan, monkeypatch):
     patch_scan([_row("WIDE", last=100.0, stop=98.0, target=104.0)])
     monkeypatch.setattr("tvlab.cli._measured_win_rate",
-                        lambda cfg, name: {"win_rate": 0.20, "n_trades": 500,
+                        lambda cfg, name: {"status": "ok", "win_rate": 0.20, "n_trades": 500,
                                            "profit_factor": 0.8, "path": "x.json",
                                            "created_at": None})
     out = _flat(runner.invoke(cli, ["suggest", "--market", "crypto", "--style", "swing"]).output)
@@ -220,7 +220,7 @@ def test_suggest_distrusts_a_thin_sample(runner, patch_scan, monkeypatch):
     green PASS marker imply the comparison is settled."""
     patch_scan([_row("WIDE", last=100.0, stop=98.0, target=104.0)])
     monkeypatch.setattr("tvlab.cli._measured_win_rate",
-                        lambda cfg, name: {"win_rate": 0.90, "n_trades": 9,
+                        lambda cfg, name: {"status": "ok", "win_rate": 0.90, "n_trades": 9,
                                            "profit_factor": 3.0, "path": "x.json",
                                            "created_at": None})
     out = _flat(runner.invoke(cli, ["suggest", "--market", "crypto", "--style", "swing"]).output)
@@ -236,8 +236,68 @@ def test_suggest_copes_with_no_previous_study(runner, patch_scan, monkeypatch):
     assert "tvlab study" in out, "must tell the user how to get one"
 
 
-def test_measured_win_rate_reads_a_real_report():
-    """End to end against the report the last study actually wrote."""
+def _write_report(tmp_path, monkeypatch, portfolio_metrics, market="crypto",
+                  strat="smc_trend", tf="4h"):
+    """Point REPO_ROOT at a temp dir holding one study report.
+
+    Reading whatever report happens to be on disk makes this test depend on what
+    anyone ran last: it passed while a 13-trade report sat there and started
+    failing the moment a 2-symbol run overwrote it with a 0-trade one. The
+    ambient-disk version is kept separately, below, as an opportunistic check.
+    """
+    import json
+    from tvlab.cli import _measured_win_rate
+    from tvlab.config import load_config
+
+    d = tmp_path / "output" / f"{strat}_{market}_{tf}"
+    d.mkdir(parents=True)
+    path = d / f"{strat}_{market}_report.json"
+    path.write_text(json.dumps({"portfolio_metrics": portfolio_metrics,
+                                "created_at": "2026-11-23T09:00:00"}))
+    monkeypatch.setattr("tvlab.cli.REPO_ROOT", tmp_path)
+    cfg = load_config(market=market, style="swing")
+    return _measured_win_rate(cfg, strat), path
+
+
+def test_measured_win_rate_status_ok(tmp_path, monkeypatch):
+    m, path = _write_report(tmp_path, monkeypatch,
+                            {"win_rate": 0.385, "n_trades": 13, "profit_factor": 1.09,
+                             "payoff_ratio": 1.7, "expectancy": 0.05})
+    assert m["status"] == "ok"
+    assert m["win_rate"] == pytest.approx(0.385)
+    assert m["n_trades"] == 13
+    assert m["path"] == str(path)
+
+
+def test_measured_win_rate_status_no_trades(tmp_path, monkeypatch):
+    """A study that ran and took no trades is an answer, not an absent one. This is
+    the state a short CSV sample or a small universe actually produces, and it used
+    to be reported as "no previous study" - telling the user to re-run what they ran."""
+    m, _ = _write_report(tmp_path, monkeypatch, {"win_rate": None, "n_trades": 0})
+    assert m["status"] == "no_trades"
+    assert m["win_rate"] is None
+    assert m["n_trades"] == 0
+
+
+def test_measured_win_rate_status_corrupt(tmp_path, monkeypatch):
+    """A half-written report must not kill the scan, but must not read as "no
+    study" either."""
+    import json
+    from tvlab.cli import _measured_win_rate
+    from tvlab.config import load_config
+
+    d = tmp_path / "output" / "smc_trend_crypto_4h"
+    d.mkdir(parents=True)
+    (d / "smc_trend_crypto_report.json").write_text("{not json")
+    monkeypatch.setattr("tvlab.cli.REPO_ROOT", tmp_path)
+    m = _measured_win_rate(load_config(market="crypto", style="swing"), "smc_trend")
+    assert m["status"] == "corrupt"
+    assert "JSONDecodeError" in m["error"]
+
+
+def test_measured_win_rate_reads_the_report_on_disk_if_there_is_one():
+    """Opportunistic: exercises the real path resolution against whatever the last
+    study wrote. Skips when there is nothing, and accepts any status."""
     from tvlab.cli import _measured_win_rate
     from tvlab.config import load_config
 
@@ -245,9 +305,57 @@ def test_measured_win_rate_reads_a_real_report():
     m = _measured_win_rate(cfg, cfg.strategy.name)
     if m is None:
         pytest.skip("no study report on disk yet")
-    assert 0.0 <= m["win_rate"] <= 1.0
-    assert m["n_trades"] >= 0
+    assert m["status"] in {"ok", "no_trades", "corrupt"}
     assert m["path"].endswith("_report.json")
+    if m["status"] == "ok":
+        assert 0.0 <= m["win_rate"] <= 1.0
+        assert m["n_trades"] >= 0
+
+
+def test_suggest_does_not_crash_when_the_study_took_no_trades(runner, patch_scan,
+                                                             monkeypatch):
+    """The regression this whole distinction exposed: with candidates present AND a
+    no_trades study, `measured["win_rate"] > be` raised
+    TypeError: '>' not supported between NoneType and float. Three sites guarded on
+    `if measured:` - truthy for a dict carrying a path but no win rate."""
+    patch_scan([_row("WIDE", last=100.0, stop=98.0, target=104.0)])
+    monkeypatch.setattr("tvlab.cli._measured_win_rate",
+                        lambda cfg, name: {"status": "no_trades", "win_rate": None,
+                                           "n_trades": 0, "path": "x.json"})
+    res = runner.invoke(cli, ["suggest", "--market", "crypto", "--style", "swing"])
+    assert res.exit_code == 0, res.output
+    assert res.exception is None
+    out = _flat(res.output)
+    assert "Top candidate: WIDE" in out, "the table and detail block must still render"
+    assert "took no trades" in out
+    assert "PASS" not in out and "FAIL" not in out, "no win rate means no verdict"
+
+
+def test_suggest_renders_a_corrupt_study_report(runner, patch_scan, monkeypatch):
+    patch_scan([_row("WIDE", last=100.0, stop=98.0, target=104.0)])
+    monkeypatch.setattr("tvlab.cli._measured_win_rate",
+                        lambda cfg, name: {"status": "corrupt", "win_rate": None,
+                                           "n_trades": 0, "path": "x.json",
+                                           "error": "JSONDecodeError:Expecting value"})
+    res = runner.invoke(cli, ["suggest", "--market", "crypto", "--style", "swing"])
+    assert res.exit_code == 0, res.output
+    out = _flat(res.output)
+    assert "unreadable" in out
+    assert "Top candidate: WIDE" in out
+
+
+def test_suggest_infers_status_when_the_dict_omits_it(runner, patch_scan, monkeypatch):
+    """The dashboard round-trips this dict through JSON and other callers may build
+    it by hand, so a missing status must not silently demote a real measurement to
+    "no previous study"."""
+    patch_scan([_row("WIDE", last=100.0, stop=98.0, target=104.0)])
+    monkeypatch.setattr("tvlab.cli._measured_win_rate",
+                        lambda cfg, name: {"win_rate": 0.60, "n_trades": 250,
+                                           "profit_factor": 1.5, "path": "x.json"})
+    out = _flat(runner.invoke(cli, ["suggest", "--market", "crypto",
+                                    "--style", "swing"]).output)
+    assert "measured on the last study" in out.lower()
+    assert "60.0%" in out
 
 
 def test_measured_win_rate_returns_none_for_an_unknown_strategy():
