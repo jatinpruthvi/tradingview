@@ -202,10 +202,22 @@ def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional
                     "error": f"{type(exc).__name__}: {exc}"}
         pm = d.get("portfolio_metrics") or {}
         wr, n = pm.get("win_rate"), pm.get("n_trades")
+        # The win rate alone is not enough to act on. It comes from a study that
+        # also ran eight validity checks, and quoting the number without the
+        # verdict is how a 38.5% win rate measured on 13 trades of an unvalidated
+        # strategy starts to look like a green light.
+        v = d.get("verdict") or {}
         base = {
             "payoff_ratio": pm.get("payoff_ratio"), "expectancy": pm.get("expectancy"),
             "profit_factor": pm.get("profit_factor"),
             "path": str(path), "created_at": d.get("created_at"),
+            # None means "this report predates the verdict being written to JSON",
+            # which must not be rendered as either validated or unvalidated.
+            "verdict": v.get("verdict"),
+            "checks_passed": v.get("n_passed"),
+            "checks_total": v.get("n_checks"),
+            "failed_checks": [c.get("check") for c in (v.get("checks") or [])
+                              if c.get("passed") is False],
         }
         if wr is None or not np.isfinite(wr):
             # A real study that took no trades. `smc_trend` is deliberately rare, so
@@ -302,6 +314,28 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
         console.print(f"  measured on the last study: win rate "
                       f"[bold]{measured['win_rate'] * 100:.1f}%[/bold] over {n} trades ({caveat})"
                       + (f", profit factor {pf:.2f}" if pf else ""))
+        # A win rate quoted without the verdict it came from reads as an
+        # endorsement. The study that produced this number also ran eight validity
+        # checks, and if it failed them the number describes one sample rather than
+        # an edge - which is the difference between a threshold comparison and a
+        # reason to trade.
+        verdict = measured.get("verdict")
+        cp, ct = measured.get("checks_passed"), measured.get("checks_total")
+        score = f" ({cp}/{ct} checks passed)" if cp is not None and ct else ""
+        if verdict == "PASSES ON THIS DATA":
+            console.print(f"  [dim]that study cleared its validity checks on this sample - "
+                          f"necessary, not sufficient; confirm out of sample.[/dim]")
+        elif verdict:
+            console.print(f"  [red]that study was [bold]{verdict}[/bold]{score}: this win rate "
+                          f"describes one historical sample, not an edge.[/red]")
+            failed = measured.get("failed_checks") or []
+            if failed:
+                shown = ", ".join(str(f) for f in failed[:3])
+                console.print(f"  [dim]failed: {shown}"
+                              f"{' …and ' + str(len(failed) - 3) + ' more' if len(failed) > 3 else ''}[/dim]")
+        else:
+            console.print(f"  [dim]that report predates the verdict being written to JSON, so "
+                          f"its validity status is unknown - re-run `tvlab study`.[/dim]")
         console.print(f"  [dim]{measured['path']}[/dim]")
     elif status == "no_trades":
         # A study ran and took no trades. That is an answer, not an absence of one:

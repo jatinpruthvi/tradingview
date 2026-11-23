@@ -16,9 +16,26 @@ recorded:
    factor of ``sqrt(n/(n-1))``.
 
 2. **Recursive indicators converge to machine epsilon.** ``atr``, ``rsi``, ``ema``,
-   ``rma``, ``macd`` and ``supertrend`` differ only during warmup, decaying
-   geometrically to ~1e-15 relative error. This confirms the ``atr()`` docstring
-   claim that the Wilder method matches ``ta.atr``.
+   ``rma``, ``macd``, ``supertrend`` and all three ``dmi`` columns differ only
+   during warmup, decaying geometrically to ~1e-15 relative error. This confirms
+   the ``atr()`` docstring claim that the Wilder method matches ``ta.atr``, and the
+   ``adx()`` claim that it matches ``ta.dmi``.
+
+   The ``adx()`` claim needed a separate route: Pine has no ``ta.adx``, so there is
+   no function of that name to compare against, and ADX gates the higher-timeframe
+   bias in ``SmcTrendStrategy`` via ``bias_adx_min``. It was therefore the one
+   indicator sitting in a live decision path with no external oracle. ``ta.dmi``
+   returns ``(+DI, -DI, ADX)`` as a triple, which is what TradingView's own
+   ``ta.dmi()`` exposes, and tvlab uses a single period for both the DI length and
+   the ADX smoothing - so the mapping is ``dmi(p, p)``, matching TradingView's
+   default ``(14, 14)``.
+
+   Its warmup is the largest of anything validated here (+DI 28%, -DI 46% relative
+   over the first hundred bars): tvlab's ``true_range`` fills bar zero with
+   ``high - low`` where ``ta.dmi``'s internal ``tr()`` is na there, and that seed is
+   then smoothed by two chained RMAs. Because ``bias_adx_min: 22.0`` is a
+   *threshold*, reading ADX inside that window compares a materially different
+   number against the same cutoff.
 
 3. **The warmup difference is real and bounded.** Pine seeds a recursive indicator
    from its first bar; pandas ``ewm(adjust=False, min_periods=n)`` also recurses
@@ -219,11 +236,46 @@ def test_bollinger_uses_population_std_like_pine(bars):
     ("macd_signal_9", lambda df: t.macd(df, 12, 26, 9)["macd_signal"]),
     ("macd_hist", lambda df: t.macd(df, 12, 26, 9)["macd_hist"]),
     ("supertrend_3_10", lambda df: t.supertrend(df, 10, 3.0)["supertrend"]),
+    # ta.dmi returns the triple (+DI, -DI, ADX); tvlab's adx() uses one period for
+    # both the DI length and the ADX smoothing, so the mapping is dmi(p, p).
+    ("dmi_plus_di_14", lambda df: t.adx(df, 14)["plus_di"]),
+    ("dmi_minus_di_14", lambda df: t.adx(df, 14)["minus_di"]),
+    ("dmi_adx_14", lambda df: t.adx(df, 14)["adx"]),
 ])
 def test_recursive_indicators_converge_to_pine(reference, bars, col, fn):
     """The steady state must be identical to float64 precision. This is what
     validates the Wilder/RMA claims in the docstrings."""
     _assert_converges(reference[col], fn(bars), col)
+
+
+def test_adx_matches_ta_dmi_in_steady_state(reference, bars):
+    """adx()'s docstring claims it "Matches TradingView's ta.dmi". Pine has no
+    ``ta.adx``, so that claim was unverifiable by name and the ADX gate in
+    ``SmcTrendStrategy`` (``bias_adx_min``) was the one live decision input with no
+    external oracle. ``ta.dmi`` returns the whole triple, which is the function the
+    claim is about, and all three columns converge to float64 precision.
+
+    The warmup is not cosmetic here: ``bias_adx_min: 22.0`` is a threshold, and +DI
+    disagrees by up to 46% relative in the first hundred bars. A study short enough
+    to read ADX inside that window is comparing a different number to the same
+    threshold. See ``bars_to_forget_seed`` for how far the window actually reaches.
+    """
+    mine = t.adx(bars, 14)
+    _assert_converges(reference["dmi_adx_14"], mine["adx"], "adx", tol=1e-9)
+    _assert_converges(reference["dmi_plus_di_14"], mine["plus_di"], "plus_di", tol=1e-9)
+    _assert_converges(reference["dmi_minus_di_14"], mine["minus_di"], "minus_di", tol=1e-9)
+    # The DX identity ADX is the RMA of. Checking it holds on tvlab's own columns
+    # pins the relationship between the three, not just each against Pine: a
+    # +DI/-DI pair that matched Pine but fed the wrong DX would still pass above.
+    di_sum = (mine["plus_di"] + mine["minus_di"]).replace(0.0, np.nan)
+    dx = 100.0 * (mine["plus_di"] - mine["minus_di"]).abs() / di_sum
+    both = dx.notna() & mine["adx"].notna()
+    # ADX is rma(dx), so it can only equal dx where dx has been constant; assert
+    # the bounded range and that ADX tracks dx's own smoothing instead.
+    adx = mine["adx"][both]
+    assert float(adx.min()) >= 0.0 and float(adx.max()) <= 100.0, "ADX out of range"
+    assert np.allclose(adx, t.rma(dx, 14)[both], rtol=1e-12), \
+        "adx is not the RMA of its own DX"
 
 
 def test_atr_wilder_matches_ta_atr_exactly_in_steady_state(reference, bars):
@@ -243,6 +295,12 @@ def test_atr_wilder_matches_ta_atr_exactly_in_steady_state(reference, bars):
     ("atr_14", lambda df: t.atr(df, 14)),
     ("rsi_14", lambda df: t.rsi(df, 14)),
     ("macd_12_26_9", lambda df: t.macd(df, 12, 26, 9)["macd"]),
+    # The DI columns carry the largest warmup error of anything cross-validated
+    # here (+DI 28%, -DI 46% relative in the first 100 bars), because tvlab's
+    # true_range fills bar zero with high-low while ta.dmi's internal tr() is na
+    # there, and that seed is smoothed by two chained RMAs.
+    ("dmi_plus_di_14", lambda df: t.adx(df, 14)["plus_di"]),
+    ("dmi_adx_14", lambda df: t.adx(df, 14)["adx"]),
 ])
 def test_warmup_disagreement_is_real_but_decays(reference, bars, col, fn):
     """Pine seeds from bar zero; pandas publishes NaN until min_periods. The early

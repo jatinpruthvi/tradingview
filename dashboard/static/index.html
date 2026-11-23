@@ -461,9 +461,33 @@ async function runSuggest(){
       const n = m.n_trades||0;
       const trust = n<30 ? 'far too few trades to trust'
                   : n<100 ? 'thin sample' : 'adequate sample';
+      // A win rate quoted on its own reads as an endorsement. The study that
+      // produced it also ran eight validity checks, and if it failed them the
+      // number describes one historical sample rather than an edge. `verdict` is
+      // absent on reports written before it was serialised to JSON, and absence
+      // must not render as "validated" - so that case is spelled out too.
+      const vd = m.verdict;
+      const failed = m.failed_checks || [];
+      const score = (m.checks_passed!=null && m.checks_total)
+                  ? ` (${m.checks_passed}/${m.checks_total} checks passed)` : '';
+      let verdictLine;
+      if(vd === 'PASSES ON THIS DATA'){
+        verdictLine = `<br><span class="mut">that study cleared its validity checks on this
+            sample — necessary, not sufficient; confirm out of sample.</span>`;
+      } else if(vd){
+        const shown = failed.slice(0,3).map(escapeHtml).join(', ');
+        const more = failed.length>3 ? ` …and ${failed.length-3} more` : '';
+        verdictLine = `<br><b style="color:#e5484d">that study was ${escapeHtml(vd)}${escapeHtml(score)}:
+            this win rate describes one historical sample, not an edge.</b>`
+            + (shown ? `<br><span class="mut">failed: ${shown}${more}</span>` : '');
+      } else {
+        verdictLine = `<br><span class="mut">that report predates the verdict being written to
+            JSON, so its validity status is unknown — re-run <code>tvlab study</code>.</span>`;
+      }
       h += `<div class="note" style="margin-bottom:10px">measured on the last study:
             win rate <b>${fmt(m.win_rate*100,1)}%</b> over ${n} trades
             (${trust})${m.profit_factor!=null?` · profit factor ${fmt(m.profit_factor,2)}`:''}
+            ${verdictLine}
             <br><span class="mut">${escapeHtml(m.path||'')}</span></div>`;
     } else if(mStatus === 'no_trades'){
       h += `<div class="note" style="margin-bottom:10px">the last study took

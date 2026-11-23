@@ -92,7 +92,22 @@ def macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> p
 
 
 def adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-    """Wilder ADX with +DI / -DI. Matches TradingView's ta.dmi."""
+    """Wilder ADX with +DI / -DI. Matches TradingView's ta.dmi.
+
+    Verified, not merely claimed: ``tests/test_pynecore_reference.py`` runs all
+    three columns against PyneCore's ``ta.dmi(period, period)`` over 600 bars and
+    they converge to ~1e-14 relative error. Pine has no ``ta.adx``, so ``ta.dmi`` -
+    which returns ``(+DI, -DI, ADX)`` - is the function this claim is about, and
+    using one period for both the DI length and the ADX smoothing is what makes
+    ``dmi(p, p)`` the right mapping.
+
+    Warmup is not safe to read here. ``true_range`` fills bar zero with
+    ``high - low`` where ``ta.dmi``'s internal ``tr()`` is na, and two chained RMAs
+    smooth that seed, so +DI disagrees by up to 28% and -DI by up to 46% relative
+    over the first hundred bars before decaying geometrically. This matters more
+    than for the other indicators because ``bias_adx_min`` is a *threshold*: inside
+    the warmup a different number is being compared against the same cutoff.
+    """
     up = df["high"].diff()
     down = -df["low"].diff()
     plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=df.index)

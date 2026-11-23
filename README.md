@@ -11,35 +11,45 @@ selectable combinations, conservative risk mandate enforced in code.
 **The default strategy is NOT validated, and on the bundled data it should not
 be.**
 
-Running the full study today:
+Running the full study today, with no overrides - this is what the committed
+config produces out of the box:
 
 ```bash
-tvlab study --market crypto --style swing --recovery --xval \
-            --set data.synthetic_bars=2500
+tvlab study --market crypto --style swing --recovery --xval
 ```
 
 ```
 VERDICT: NOT VALIDATED                          3 of 8 checks passed
 
- 1  Enough trades to measure            FAIL    13 trades - below 30 every ratio is noise
- 2  Deflated Sharpe (multiple testing)  FAIL    DSR=0.002 over 320 trials
- 3  Drawdown within mandate             PASS    max DD 0.37% vs limit 10.0%
- 4  Profit factor > 1 after costs       PASS    PF=1.09
+ 1  Enough trades to measure            PASS    31 trades
+ 2  Deflated Sharpe (multiple testing)  FAIL    DSR=0.000 over 320 trials
+ 3  Drawdown within mandate             PASS    max DD 0.97% vs limit 10.0%
+ 4  Profit factor > 1 after costs       FAIL    PF=0.58
  5  Walk-forward windows profitable     FAIL    1/5 OOS windows profitable (20%)
- 6  OOS retains IS performance          n/a     not measurable - see below
- 7  Beats shuffled-return null          FAIL    p=0.200
+ 6  OOS retains IS performance          FAIL    not measurable - see below
+ 7  Beats shuffled-return null          FAIL    p=0.533 (beat only 47% of 60 permutations)
  8  Monte Carlo DD-breach risk          PASS    P(max DD >= 10%) = 0.0% of 2000 sims
 
- Portfolio: +0.08% return, 0.37% max DD, 13 trades, PF 1.09, Sharpe 0.16
- Walk-forward OOS: -0.44% return, Sharpe -0.53, PF 0.76
+ Portfolio: -0.95% return, 0.97% max DD, 31 trades, PF 0.58, Sharpe -1.00,
+            fees 1,366 on 100,000 of capital
+ Walk-forward OOS: +0.43% return, Sharpe 0.32, PF 1.58 - over 3 trades total
 ```
 
-These are the numbers that command produces with the committed config
-(`walk_forward.n_splits: 5`, `monte_carlo.n_sims: 2000`, `max_trials: 64`, which
-the walk-forward multiplies across its 5 windows to reach 320). An earlier revision
-of this README quoted a 4-split run with 500 simulations; the portfolio line was
-identical but checks 2, 5, 6 and 8 were not. Quoting a run whose flags are not
-written down is how documentation drifts, so the command is now part of the quote.
+Those are the numbers the command produces with the committed config
+(`data.synthetic_bars: 4000`, `walk_forward.n_splits: 5`, `monte_carlo.n_sims:
+2000`, `max_trials: 64`, which the walk-forward multiplies across its 5 windows to
+reach 320).
+
+**A shorter sample looks better, and that is why it is not the headline.** This
+README previously quoted `--set data.synthetic_bars=2500`, which produces 13 trades,
+PF 1.09 and a +0.08% return - the only configuration tested where the strategy is
+net positive. It was carried over from an older run rather than chosen, but the
+effect is the same either way: it flatters the result. At the default 4000 bars the
+same strategy loses money. Documenting the config a user actually gets is the only
+defensible choice, so the override is gone. (Before that it quoted a 4-split run
+with 500 simulations, whose portfolio line matched but whose checks did not. A
+number quoted without the flags that produced it is not reproducible, which is how
+documentation drifts.)
 
 Why this is the correct answer rather than a failure of the project:
 
@@ -47,23 +57,34 @@ Why this is the correct answer rather than a failure of the project:
   environment, so `tvlab` ships a generator (Markov regime chain + GARCH(1,1)
   volatility + Student-t tails). Synthetic prices contain regime drift and
   volatility clustering, but **no exploitable microstructure**. A cost-bearing
-  strategy on such data should converge to roughly zero minus costs. It does:
-  +0.08% over 2,500 bars with 541 in fees.
-- **13 trades cannot support any conclusion.** Check 1 exists to stop you reading
-  a 38.5% win rate as information. It isn't.
-- **Check 6 is `n/a`, and that is worse than a failure.** It compares each
-  walk-forward window's out-of-sample objective against its in-sample one. With 13
-  trades spread over 5 rolling windows, no training window reaches the minimum
-  trades needed to compute an objective at all, so the ratio is undefined and the
-  check reports `n/a` rather than guessing. The overfitting question - do parameters
-  chosen in-sample keep working out of sample? - **cannot be answered on this data
-  in either direction.** An earlier 4-split configuration had windows large enough
-  to produce a ratio of −0.27, i.e. the fit inverted; that is consistent with what
-  check 5 and the OOS numbers already show (−0.44%, Sharpe −0.53, PF 0.76).
-- **The checks that did run all point the same way.** DSR 0.002 across 320 trials
-  says the Sharpe is indistinguishable from the best of 320 random tries; the
-  shuffled-return null at p=0.200 says the equity curve is indistinguishable from
-  its own permutation. Neither is a close call.
+  strategy on such data should converge to roughly zero minus costs, and it does:
+  −0.95% over 4,000 bars, of which 1,366 is fees on 100,000 of capital.
+- **31 trades clears check 1's floor and still supports no conclusion.** The floor
+  is 30 because below it a win rate has enormous confidence intervals; clearing it
+  is the minimum for the ratio to mean anything, not evidence that it does. The
+  29.0% win rate here is a description of one sample.
+- **Check 6 is unmeasurable, and the report now says exactly why.** It compares
+  each walk-forward window's out-of-sample objective against its in-sample one. The
+  in-sample fits are fine - 8 to 11 trades each against a floor of 8. It is the
+  *out-of-sample* segments that fail: 5 rolling splits over 4,000 bars leave each
+  test segment about 320 bars long, which produces **0 or 1 trades** against the
+  same floor, so every OOS objective is degenerate and the ratio has no numerator.
+  The check reports `not measurable` with those counts rather than a bare `n/a`,
+  because `n/a` reads like an unimplemented feature when it is actually a finding
+  about the sample. The overfitting question - do parameters chosen in-sample keep
+  working out of sample? - **cannot be answered on this data in either direction.**
+  The fixes are fewer splits (longer test segments) or a longer history; changing
+  the validation config to make a check measurable is not something this repo does
+  silently.
+- **The most flattering number in the report is the least meaningful.** The stitched
+  walk-forward equity shows +0.43%, Sharpe 0.32 and PF 1.58 - better than the
+  in-sample result. It rests on **3 trades in total** across all five out-of-sample
+  segments. This is the trap the whole validity stack exists to catch, appearing in
+  the output of the stack itself.
+- **The checks that did run all point the same way.** DSR 0.000 across 320 trials
+  says the Sharpe is indistinguishable from the best of 320 random tries. The
+  shuffled-return null gives p=0.533: the strategy beat only 47% of permutations of
+  its own returns, i.e. it did *worse* than its own noise. Neither is a close call.
 
 What would change the verdict is **real data**, not more tuning:
 
@@ -129,14 +150,22 @@ not a forecast** - it needs no view about the market, which is why it is the
 threshold the tool presents rather than an expected return.
 
 `suggest` then compares it against the win rate the strategy *actually achieved* in
-your most recent `tvlab study`, and states the sample size:
+your most recent `tvlab study`, states the sample size, **and reports the verdict
+that win rate came from**:
 
 ```
 $ tvlab suggest --market crypto --style swing
-  round-trip cost 30.0 bp  ·  scanned 10 symbols  ·  max breakeven 60%
-  measured on the last study: win rate 38.5% over 13 trades
-  (far too few trades to trust), profit factor 1.09
+  round-trip cost 30.0 bp  ·  scanned 10 symbols  ·  0 candidate(s), 0 rejected  ·  max breakeven 60%
+  measured on the last study: win rate 29.0% over 31 trades (thin sample), profit factor 0.58
+  that study was NOT VALIDATED (3/8 checks passed): this win rate describes one historical sample, not an edge.
+  failed: Deflated Sharpe (multiple testing), Profit factor > 1 after costs, Walk-forward windows profitable …and 2 more
 ```
+
+A win rate quoted on its own reads as an endorsement. The same number next to the
+study's verdict does not, which is the difference between a threshold comparison and
+a reason to trade. Reports written before the verdict was serialised to JSON render
+as *unknown* rather than as a pass - absence of evidence is not printed as evidence
+of absence. The dashboard shows the same three cases.
 
 Anything whose breakeven exceeds `--max-breakeven` (default 60%) is **rejected**,
 not ranked lower: a lower rank implies a worse version of a good idea, and an idea
@@ -146,7 +175,7 @@ independent - loosening one does not resurrect the other.
 
 The score combines five weighted components (reward:risk 25%, cost drag 25%, stop
 quality 20%, trend alignment 15%, location in a zone 15%). The weights are **not
-fitted** - fitting them on 13 trades is noise mining, so they are fixed and stated
+fitted** - fitting them on 31 trades is noise mining, so they are fixed and stated
 in `src/tvlab/screener/quality.py`.
 
 `GET /api/suggest` serves the same structure to the dashboard, through the same
@@ -351,10 +380,23 @@ Result: all strategies and indicators pass, 0 leaks across 4 cut points.
 
 **Why this matters here specifically:** the vendored `smartmoneyconcepts`
 reference computes `swing_highs_lows` and `fvg` with *negative* shifts — it
-publishes a pivot on the pivot bar, before the bars that confirm it exist. Fed to
-a backtester that inflates profit factor to 3–10. `indicators/smc.py` is a
-from-scratch lag-safe implementation; `indicators/reference.py` compares the two
-and confirms the reference's own convention is non-causal. Cross-validation on
+publishes a pivot on the pivot bar, before the bars that confirm it exist.
+`indicators/smc.py` is a from-scratch lag-safe implementation;
+`indicators/reference.py` compares the two and confirms the reference's own
+convention is non-causal.
+
+An earlier revision of this paragraph claimed that feeding the non-causal
+convention to a backtester "inflates profit factor to 3–10". That figure was
+unsourced folklore and it does not reproduce here: measured over 5 seeds, the
+non-causal convention *lowered* profit factor in 4 of them and produced fewer
+trades in all 5 (`tests/test_reference_quarantine.py`). The reason is structural —
+this pipeline derives sweep ages, structure state and zone ages *from* the swing
+series, so publishing pivots early re-times every feature the strategy was designed
+around rather than handing it future prices.
+
+That makes the quarantine more important, not less. A look-ahead bug does not
+reliably make results look better, so a disappointing backtest is not evidence of
+honesty; the number is meaningless in either direction. Cross-validation on
 1,500 bars: swing points match 94.4% at the documented 12-bar lag, fair value
 gaps match 100% and the gap *levels* are identical after the 1-bar lag.
 
@@ -485,12 +527,21 @@ Stated plainly, because each one changes what the output means.
   risk-off move correlations go to 1 and the groups here would understate it.
 - **The scanner's TradingView path is untested live** for the reason above;
   `tvscreener`'s API is introspected and guarded with `hasattr`.
-- **The `smc_trend` setup is deliberately rare.** On 2,500 bars of synthetic 4h
-  data it takes 13 trades across a 10-symbol universe. Loosening it to generate
-  more trades was tried and **measured worse** (entry on FVG/order-block
-  retracement as well as sweeps: 93 trades, profit factor 0.58 vs 0.9). The
-  default is the doctrinal sweep entry, and the alternative is left in the code
-  behind `entry_mode` with that result documented beside it.
+- **The `smc_trend` setup is deliberately rare.** On the default 4,000 bars of
+  synthetic 4h data it takes 31 trades across a 10-symbol universe, of which the
+  risk caps fund 2. Loosening it to generate more trades was tried and **measured
+  worse**: `entry_mode: sweep_or_zone` also accepts a retracement into an
+  unmitigated FVG or order block, and across 10 samples it multiplied the
+  opportunity set 10-23x while making total return, Sharpe and max drawdown worse
+  in **10 of 10**. `tests/test_entry_mode.py` pins that.
+- **Profit factor is the wrong instrument for that comparison**, and this README
+  used to make the argument with it. The same bullet previously claimed zone entries
+  degraded PF "from ~0.9 to ~0.58 over 93 trades"; no seed at any bar count tested
+  reproduces those numbers. PF moved in *both* directions - worse in 5 samples of
+  10, better in 5 - because it is gross profit over gross loss and is blind to how
+  often capital is deployed and to fee drag. Taking 17x more trades at a similar PF
+  is a much worse outcome that PF itself does not report. Judge that switch on
+  return, Sharpe and drawdown.
 
 ---
 

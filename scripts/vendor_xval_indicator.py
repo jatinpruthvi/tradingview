@@ -57,6 +57,16 @@ def main():
     plot(st, 'supertrend_3_10')
     plot(direction, 'supertrend_dir_3_10')
 
+    # adx(): Wilder ADX with +DI/-DI, whose docstring claims it "matches
+    # TradingView's ta.dmi". Pine has no ta.adx, but ta.dmi returns the whole
+    # triple and is the function that claim is about. tvlab uses one period for
+    # both the DI length and the ADX smoothing, so the mapping is dmi(p, p) --
+    # which is also TradingView's own ta.dmi() default of (14, 14).
+    plus_di, minus_di, adx_ = ta.dmi(14, 14)
+    plot(plus_di, 'dmi_plus_di_14')
+    plot(minus_di, 'dmi_minus_di_14')
+    plot(adx_, 'dmi_adx_14')
+
     # donchian(): tvlab shifts the bands by one bar so bar i's band excludes bar
     # i. ta.highest/lowest do NOT shift, so both are plotted and the test
     # compares tvlab's band against the *shifted* Pine value.

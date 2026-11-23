@@ -52,11 +52,24 @@ class SmcTrendStrategy(Strategy):
         "bias_adx_period": 14,
         "bias_adx_min": 22.0,
         # "sweep" is the doctrinal setup and the default. "sweep_or_zone" also
-        # accepts a retracement into an unmitigated FVG/order block: it roughly
-        # multiplies the opportunity set, but on the reference synthetic sample it
-        # degraded profit factor from ~0.9 to ~0.58 over 93 trades. That is a
-        # measured result, not a hunch - re-measure it on your own data before
-        # switching, and do not switch just to get more trades.
+        # accepts a retracement into an unmitigated FVG/order block.
+        #
+        # MEASURED, not a hunch: tests/test_entry_mode.py re-runs both modes over
+        # the crypto/swing universe and asserts the direction. Across 10 samples
+        # (5 seeds x 2500/4000 bars) zone entries multiplied the opportunity set
+        # 10-23x and made total return, Sharpe and max drawdown worse in 10 of 10.
+        #
+        # Profit factor is NOT the way to judge this, and an earlier revision of
+        # this comment did exactly that, quoting "~0.9 to ~0.58 over 93 trades" -
+        # numbers that reproduce on no seed at any bar count tested. PF moved in
+        # both directions (worse in 5 of 10, better in 5; e.g. seed 99 at 2500 bars
+        # goes 0.18 -> 0.58 while the return goes -1.01% -> -4.33%). PF is gross
+        # profit over gross loss: it is blind to how often capital is deployed and
+        # to fee drag, so taking 17x more trades at a similar PF is a much worse
+        # outcome that PF itself does not report.
+        #
+        # Re-measure on your own data before switching, and do not switch just to
+        # get more trades. If you do, read the return and the drawdown, not the PF.
         "entry_mode": "sweep",
         "require_fvg": False,
         "require_structure": True,

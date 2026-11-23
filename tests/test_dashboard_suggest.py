@@ -160,7 +160,8 @@ requires_node = pytest.mark.skipif(node is None, reason="node is not installed")
 @pytest.mark.parametrize("case", ["populated", "empty", "no_study",
                                   "data_failure", "partial_failure",
                                   "study_no_trades", "study_corrupt",
-                                  "status_inferred"])
+                                  "status_inferred", "study_unvalidated",
+                                  "study_validated", "study_no_verdict"])
 def test_runSuggest_renders_without_throwing(case, suggest_payload, script_body, tmp_path):
     """Actually execute the renderer. The populated branch cannot be reached with
     synthetic data - no strategy reliably fires on the final bar - so it would
@@ -190,6 +191,28 @@ def test_runSuggest_renders_without_throwing(case, suggest_payload, script_body,
         # an older payload with no `status` key must still be read as a measurement
         payload["measured"] = {"win_rate": 0.62, "n_trades": 300, "profit_factor": 1.6,
                                "path": "output/x/report.json"}
+    elif case == "study_unvalidated":
+        # the shape the CLI produces today: a win rate, and the verdict it came from
+        payload["measured"] = {
+            "status": "ok", "win_rate": 0.29, "n_trades": 31, "profit_factor": 0.58,
+            "path": "output/x/report.json", "verdict": "NOT VALIDATED",
+            "checks_passed": 3, "checks_total": 8,
+            "failed_checks": ["Deflated Sharpe (multiple testing)",
+                              "Profit factor > 1 after costs",
+                              "Walk-forward windows profitable",
+                              "OOS retains IS performance",
+                              "Beats shuffled-return null"],
+        }
+    elif case == "study_validated":
+        payload["measured"] = {
+            "status": "ok", "win_rate": 0.55, "n_trades": 400, "profit_factor": 1.4,
+            "path": "output/x/report.json", "verdict": "PASSES ON THIS DATA",
+            "checks_passed": 8, "checks_total": 8, "failed_checks": [],
+        }
+    elif case == "study_no_verdict":
+        # a report written before the verdict was serialised: unknown, not "fine"
+        payload["measured"] = {"status": "ok", "win_rate": 0.55, "n_trades": 400,
+                               "profit_factor": 1.4, "path": "output/x/report.json"}
 
     js = script_body
     assert js.count("\nboot();") == 1, "boot() invocation moved; update the strip"
@@ -270,6 +293,24 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
         assert "62.0%" in out
         assert "adequate sample" in flat
         assert "PASS" in out, "a real measurement must license the comparison"
+    elif case == "study_unvalidated":
+        # The win rate must not stand alone: the study behind it failed its own
+        # validity checks, and the panel has to say so next to the number.
+        assert "29.0%" in out
+        assert "NOT VALIDATED" in flat
+        assert "3/8 checks passed" in flat
+        assert "not an edge" in flat
+        assert "Deflated Sharpe" in flat, "should name what failed"
+        assert "and 2 more" in flat, "should truncate the failed-check list"
+    elif case == "study_validated":
+        assert "PASSES ON THIS DATA" in flat or "cleared its validity checks" in flat
+        assert "not an edge" not in flat, "must not warn about a study that passed"
+        assert "necessary, not sufficient" in flat
+    elif case == "study_no_verdict":
+        # Absence of a verdict is unknown, and must not read as a pass.
+        assert "validity status is unknown" in flat
+        assert "not an edge" not in flat
+        assert "cleared its validity checks" not in flat
         assert "no previous study" not in flat
 
 

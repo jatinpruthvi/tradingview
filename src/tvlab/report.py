@@ -281,7 +281,21 @@ def _verdict(study, wf_summary: Optional[Dict[str, Any]],
     checks: List[Dict[str, Any]] = []
 
     def add(name: str, passed: Optional[bool], detail: str) -> None:
-        checks.append({"check": name, "passed": passed, "detail": detail})
+        # Normalise here, once, rather than at every comparison site. Several of
+        # these expressions are `np.isfinite(x) and x >= t`, which yields
+        # ``np.False_`` - not a subclass of ``bool`` - whenever x is NaN. That had
+        # two consequences:
+        #   * ``hard_fail`` tests ``c["passed"] is False``, and ``np.False_ is
+        #     False`` is False, so a failing walk-forward or shuffled-null check
+        #     was silently skipped and the verdict came out PARTIAL instead of
+        #     NOT VALIDATED;
+        #   * ``json.dumps(..., default=str)`` turns np.False_ into the *string*
+        #     "False", which is truthy in every consumer, so a failed check would
+        #     have rendered green in the dashboard.
+        # ``None`` still means "not evaluated" and must not be coerced to False.
+        checks.append({"check": name,
+                       "passed": None if passed is None else bool(passed),
+                       "detail": detail})
 
     n_trades = int(m.get("n_trades") or 0)
     add("Enough trades to measure",
@@ -314,9 +328,50 @@ def _verdict(study, wf_summary: Optional[Dict[str, Any]],
             f"{wf_summary.get('windows_profitable', 0)}/{wf_summary.get('n_windows', 0)} "
             f"OOS windows profitable (hit rate {hr:.0%})" if np.isfinite(hr) else "n/a")
         eff = wf_summary.get("mean_oos_efficiency", float("nan"))
-        add("OOS retains IS performance",
-            np.isfinite(eff) and eff >= 0.3,
-            f"mean OOS/IS objective ratio = {eff:.2f}" if np.isfinite(eff) else "n/a")
+        if np.isfinite(eff):
+            eff_detail = f"mean OOS/IS objective ratio = {eff:.2f}"
+        else:
+            # Undefined, not zero, and the report has to say which. A bare "n/a"
+            # here reads like an unimplemented check; the real situation is that
+            # the sample is too small for the ratio to have a denominator, which
+            # is a finding about the data, not a gap in the tooling.
+            n_un = int(wf_summary.get("windows_unscoreable") or 0)
+            n_win = int(wf_summary.get("n_windows") or 0)
+            side = wf_summary.get("unscoreable_side")
+            got_is = wf_summary.get("unscoreable_train_trades") or []
+            got_oos = wf_summary.get("unscoreable_test_trades") or []
+            need = wf_summary.get("unscoreable_required") or []
+            if n_un and side == "test" and got_oos and need:
+                # The common case with the shipped config: the training windows fit
+                # and score normally, but each out-of-sample segment is too short to
+                # produce enough trades to score, so the ratio's numerator is -inf.
+                eff_detail = (
+                    f"not measurable: in {n_un}/{n_win} windows the out-of-sample "
+                    f"segment was too short to score (OOS trades {got_oos} vs "
+                    f"{min(need)} required) while the in-sample fits scored fine - "
+                    f"the ratio is undefined, not zero. Fewer walk-forward splits or "
+                    f"a longer history would make it measurable")
+            elif n_un and side == "train" and got_is and need:
+                short = [g for g, r in zip(got_is, need) if g < r]
+                if len(short) == len(got_is):
+                    eff_detail = (
+                        f"not measurable: {n_un}/{n_win} windows had too few "
+                        f"in-sample trades to score (best {max(got_is)} vs {min(need)} "
+                        f"required), so the OOS/IS ratio has no denominator - "
+                        f"undefined, not zero")
+                else:
+                    eff_detail = (
+                        f"not measurable: {n_un}/{n_win} windows produced no usable "
+                        f"in-sample objective (train trades {got_is}, required {need})")
+            elif n_un and side == "mixed":
+                eff_detail = (
+                    f"not measurable: {n_un}/{n_win} windows could not be scored on "
+                    f"one side or the other (train trades {got_is}, OOS trades "
+                    f"{got_oos}, required {need})")
+            else:
+                eff_detail = ("not measurable: no walk-forward window produced a "
+                              "usable objective on both sides")
+        add("OOS retains IS performance", np.isfinite(eff) and eff >= 0.3, eff_detail)
 
     if nulls:
         sh = nulls.get("shuffled_returns")
@@ -863,6 +918,16 @@ def write_report(
         "config": study.config.to_dict(),
         "config_fingerprint": study.config.fingerprint(),
         "data_provenance": data_provenance,
+        # The verdict and its checks were previously rendered into the markdown and
+        # nowhere else, which made the single most decision-relevant output of the
+        # whole project unreadable by anything but a human. The dashboard could not
+        # show "NOT VALIDATED" next to a profitable-looking equity curve, and the
+        # suggest endpoint could not tell a user that the win rate it was quoting
+        # came from a study that failed its own validity checks.
+        "verdict": _jsonable(_verdict(study,
+                                      wf.summary() if wf is not None else None,
+                                      nulls,
+                                      mc.summary() if mc is not None else None)),
         "portfolio_metrics": _jsonable(study.portfolio_metrics or {}),
         "allocation": _jsonable(getattr(study, "allocation", None)),
         "unallocated": _jsonable(getattr(study, "unallocated", []) or []),

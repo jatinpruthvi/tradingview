@@ -99,14 +99,33 @@ from-scratch SMC implementation against a widely-used reference.
 
 **Why only there:** its `swing_highs_lows` and `fvg` use *negative* shifts, so
 they publish a pivot on the pivot bar, before the bars that confirm it exist.
-Fed to a backtester that inflates profit factor to 3–10. `indicators/smc.py` is
-a lag-safe reimplementation; `reference.py` compares the two and demonstrates the
-reference's own non-causality. Cross-validation on 1,500 bars: swing points match
-94.4% at the documented 12-bar lag, fair value gaps match 100% with identical
-levels after a 1-bar lag.
+`indicators/smc.py` is a lag-safe reimplementation; `reference.py` compares the two
+and demonstrates the reference's own non-causality. Cross-validation on 1,500 bars:
+swing points match 94.4% at the documented 12-bar lag, fair value gaps match 100%
+with identical levels after a 1-bar lag.
 
-**It is never imported by a strategy, the engine, or the scanner.** A
-look-ahead-prone library in a trading path is how a backtest lies to you.
+**It is never imported by a strategy, the scanner or the sizer, and no decision
+depends on it.** `tests/test_reference_quarantine.py` enforces that three ways: an
+AST scan pins the importer set to exactly `indicators/reference.py`, `cli.py` (the
+`validate` command) and `pipeline.py`; and a full study is run with
+`smartmoneyconcepts` blocked at `sys.meta_path`, recording every import attempt,
+which must come back empty.
+
+The `pipeline.py` import deserves precision, because an earlier revision of this
+file claimed the engine never imports it, which was literally false. It does —
+deferred, inside `if cross_validate:`, with its result attached to
+`Study.cross_validation` and wrapped so a missing library only drops that section of
+the report. It cannot reach a signal, an entry, an exit or a position size.
+
+**Correction to a figure this file used to carry.** It claimed that feeding the
+reference's non-causal convention to a backtester "inflates profit factor to 3–10".
+That was unsourced and it does not reproduce: measured over 5 seeds the convention
+*lowered* profit factor in 4 of them and produced fewer trades in all 5. This
+pipeline derives sweep ages, structure state and zone ages from the swing series, so
+early pivots re-time the features rather than leak future prices into them. The
+quarantine stands on non-causality, not on the direction of the distortion — a
+look-ahead bug that makes results look *worse* is still meaningless, and is arguably
+more dangerous, because a bad backtest does not invite suspicion.
 
 ### 4. `tvscreener` (Apache-2.0) — universe screener
 
@@ -256,7 +275,7 @@ formula, which makes them a poor oracle.
 
 **Used instead through #9's `ta` built-ins**, which is the same Pine semantics
 without the third-party parameters in the way. That closes what was previously
-listed here as the best remaining use. 26 tests in
+listed here as the best remaining use. 32 tests in
 `tests/test_pynecore_reference.py`, run over 600 bars.
 
 Results, all asserted rather than merely noted:
@@ -269,9 +288,10 @@ Results, all asserted rather than merely noted:
 | `ema`, `rma` | `ta.ema`, `ta.rma` | converge to ~1e-15 |
 | `macd` (all 3 outputs) | `ta.macd` | converge to ~1e-13 |
 | `supertrend` band | `ta.supertrend(3,10)[0]` | converges to ~1e-16 |
+| `adx` (all 3 outputs) | `ta.dmi(14,14)` | converge to ~1e-14 |
 | `donchian` | `ta.highest`/`ta.lowest` | differs by exactly one bar, deliberately |
 
-Three findings worth keeping:
+Four findings worth keeping:
 
 1. **`bollinger`'s `ddof=0` is correct and now proven.** Pine's `ta.stdev`
    defaults to `biased=True`, i.e. population std. pandas' `.rolling().std()`
@@ -295,6 +315,24 @@ Three findings worth keeping:
    strategies sit in this directory as reference material and copying one across
    would silently invert every entry. Documented in the `supertrend()` docstring
    where a porter would see it.
+
+4. **`adx` was the one indicator in a live decision path with no external oracle,
+   and it is now validated.** Pine has no `ta.adx`, so there is no function of that
+   name to compare against — but `ta.dmi(diLength, adxSmoothing)` returns
+   `(+DI, -DI, ADX)` as a triple, which is the function `adx()`'s docstring claim
+   ("matches TradingView's `ta.dmi`") was actually about. tvlab uses one period for
+   both the DI length and the ADX smoothing, so the mapping is `dmi(p, p)` — also
+   TradingView's own `ta.dmi()` default of `(14, 14)`. All three columns converge to
+   ~1e-14.
+
+   Its warmup is the **largest** of anything cross-validated here: +DI disagrees by
+   up to 28% and -DI by up to 46% relative over the first hundred bars, because
+   tvlab's `true_range` fills bar zero with `high - low` where `ta.dmi`'s internal
+   `tr()` is na there, and two chained RMAs then smooth that seed. This matters more
+   than for the other indicators because `bias_adx_min: 22.0` is a *threshold* —
+   inside the warmup a materially different number is compared against the same
+   cutoff, so the higher-timeframe bias gate in `SmcTrendStrategy` can disagree with
+   TradingView's on a short sample.
 
 ### 11. `klinecharts/KLineChart` (Apache-2.0)
 
@@ -390,16 +428,22 @@ licence means all rights reserved, not public domain. Educational reference only
 | `supertrend` direction sign trap documented at the source | `src/tvlab/indicators/technical.py` |
 | `pynesys-pynecore[cli]` as an optional test dependency | `requirements-optional.txt` |
 | 73 new tests | `tests/test_nse_source.py`, `tests/test_cli_nse.py`, `tests/test_trendlines.py` |
-| 26 more tests | `tests/test_pynecore_reference.py` |
+| 32 more tests | `tests/test_pynecore_reference.py` |
+| `adx` cross-validated against `ta.dmi` — the last unvalidated indicator in a live decision path | `scripts/vendor_xval_indicator.py`, `tests/test_pynecore_reference.py`, `src/tvlab/indicators/technical.py` |
+| The #3 quarantine made machine-enforced instead of prose | `tests/test_reference_quarantine.py` (new) |
+| The unsourced "inflates PF to 3–10" claim replaced with a measurement | `README.md`, `VENDOR.md`, `tests/test_reference_quarantine.py` |
 
 **Still open, in rough order of value:**
 
 1. ~~Cross-validate `indicators/technical.py` against the 471 Pine-compiled
    indicators in #10.~~ **Closed** — done through #9's `ta` built-ins rather than
    the compiled scripts, for the reason given in section 10. Results table and the
-   three findings are in that section; the tests are
-   `tests/test_pynecore_reference.py` (26) driven by
-   `scripts/vendor_xval_indicator.py`.
+   four findings are in that section; the tests are
+   `tests/test_pynecore_reference.py` (32) driven by
+   `scripts/vendor_xval_indicator.py`. Coverage now includes `adx`, which had been
+   the one indicator used in a live decision path (the `bias_adx_min` gate) with no
+   external oracle; `ta.dmi` turned out to be the function its docstring claim was
+   about all along.
 2. Verify the NSE and Yahoo payload shapes against the live APIs. They are
    reconstructed, not captured. This one cannot be closed from a sandbox with no
    route to NSE or Yahoo — it needs a networked machine.

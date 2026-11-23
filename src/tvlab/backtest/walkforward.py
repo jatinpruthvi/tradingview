@@ -103,6 +103,42 @@ class WalkForwardResult:
 
     def summary(self) -> Dict[str, Any]:
         effs = [w.efficiency for w in self.windows if np.isfinite(w.efficiency)]
+        # Windows whose efficiency is undefined, and *why*. A NaN mean efficiency
+        # used to reach the report as a bare "n/a", which reads like a missing
+        # feature rather than a measurement that could not be made. The cause is
+        # almost always that the training window had too few trades for
+        # `objective_value` to score at all, so it returned -inf and the OOS/IS
+        # ratio has no denominator. Carrying the counts lets the report say so.
+        unscoreable = [w for w in self.windows if not np.isfinite(w.efficiency)]
+        # WHICH side failed matters, because the two have opposite remedies. A
+        # degenerate *train* objective means the fitting window is too small; a
+        # degenerate *test* objective means the out-of-sample segment is too small.
+        # With the default 5 rolling splits over 4000 bars the train window is 2400
+        # bars and scores fine, while each test segment is ~320 bars and produces
+        # about one trade against a floor of three - so every window's OOS objective
+        # is -inf and the ratio is undefined. Reporting that as "too few in-sample
+        # trades" would send someone to add bars per window when the actual fix is
+        # fewer splits (longer test segments) or a longer history.
+        train_side: List[WindowResult] = []
+        test_side: List[WindowResult] = []
+        for w in unscoreable:
+            if not np.isfinite(w.objective_train) or w.objective_train == 0:
+                train_side.append(w)
+            else:
+                test_side.append(w)
+        if train_side and test_side:
+            unscoreable_side = "mixed"
+        elif test_side:
+            unscoreable_side = "test"
+        elif train_side:
+            unscoreable_side = "train"
+        else:
+            unscoreable_side = None
+        unscored_train_trades = [int((w.train_metrics or {}).get("n_trades") or 0)
+                                 for w in unscoreable]
+        unscored_test_trades = [int((w.test_metrics or {}).get("n_trades") or 0)
+                                for w in unscoreable]
+        unscored_required = [int(w.min_trades_required) for w in unscoreable]
         pos = [w for w in self.windows if (w.test_metrics.get("net_pnl") or 0) > 0]
         m = self.oos_metrics or {}
         return {
@@ -112,6 +148,12 @@ class WalkForwardResult:
             "window_hit_rate": len(pos) / self.n_windows if self.n_windows else float("nan"),
             "mean_oos_efficiency": float(np.mean(effs)) if effs else float("nan"),
             "median_oos_efficiency": float(np.median(effs)) if effs else float("nan"),
+            "windows_scorable": len(effs),
+            "windows_unscoreable": len(unscoreable),
+            "unscoreable_side": unscoreable_side,
+            "unscoreable_train_trades": unscored_train_trades,
+            "unscoreable_test_trades": unscored_test_trades,
+            "unscoreable_required": unscored_required,
             "oos_return_pct": m.get("total_return_pct"),
             "oos_cagr_pct": m.get("cagr_pct"),
             "oos_max_dd_pct": m.get("max_drawdown_pct"),
