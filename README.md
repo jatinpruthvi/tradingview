@@ -64,12 +64,74 @@ the tool.
 . .venv/bin/activate
 
 tvlab markets                         # what is configured
+tvlab suggest  --market crypto --style swing          # the best idea, after costs
 tvlab scan     --market crypto --style swing          # who is in a setup right now
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 209 tests
+pytest                                                # 385 tests
 ```
+
+### `tvlab suggest` ranks by expectancy after costs, not by R:R
+
+Reward:risk is a ratio of two distances, so it can be made arbitrarily large by
+shrinking the stop. Sorting a shortlist on it therefore promotes the *tightest*
+stops - the ones ordinary noise hits - and reports the best-looking numbers for
+the worst ideas.
+
+`tvlab suggest` ranks on the R:R **you actually get**. Costs are charged on
+notional while risk is measured in R, so the conversion divides by the stop
+distance:
+
+```
+round-trip cost = 2 * (fee_bps + slippage_bps) / 10000
+cost_in_R       = round-trip cost / stop_distance          # what you pay to enter and exit
+breakeven       = (1 + cost_in_R) / (1 + R:R)              # win rate needed to not lose money
+```
+
+At the crypto default of 30 bp round trip, a 0.20% stop costs **1.5R to place the
+trade**, so even a 5:1 idea needs a 41.7% win rate - against 16.7% if costs were
+zero. The same idea at a 1.50% stop needs 20.0%:
+
+| stop distance | cost in R | breakeven at R:R 5 | at R:R 3 | at R:R 2 |
+|---------------|-----------|--------------------|----------|----------|
+| 0.20%         | 1.50      | **41.7%**          | 62.5%    | 83.3%    |
+| 0.50%         | 0.60      | 26.7%              | 40.0%    | 53.3%    |
+| 1.00%         | 0.30      | 21.7%              | 32.5%    | 43.3%    |
+| 1.50%         | 0.20      | 20.0%              | 30.0%    | 40.0%    |
+| 2.50%         | 0.12      | 18.7%              | 28.0%    | 37.3%    |
+
+The breakeven win rate is **arithmetic on the fee schedule and the stop distance,
+not a forecast** - it needs no view about the market, which is why it is the
+threshold the tool presents rather than an expected return.
+
+`suggest` then compares it against the win rate the strategy *actually achieved* in
+your most recent `tvlab study`, and states the sample size:
+
+```
+$ tvlab suggest --market crypto --style swing
+  round-trip cost 30.0 bp  ·  scanned 10 symbols  ·  max breakeven 60%
+  measured on the last study: win rate 38.5% over 13 trades
+  (far too few trades to trust), profit factor 1.09
+```
+
+Anything whose breakeven exceeds `--max-breakeven` (default 60%) is **rejected**,
+not ranked lower: a lower rank implies a worse version of a good idea, and an idea
+that cannot be taken at any win rate is not that. A stop below the risk mandate's
+`min_stop_distance_pct` is rejected by that floor too, and the two gates are
+independent - loosening one does not resurrect the other.
+
+The score combines five weighted components (reward:risk 25%, cost drag 25%, stop
+quality 20%, trend alignment 15%, location in a zone 15%). The weights are **not
+fitted** - fitting them on 13 trades is noise mining, so they are fixed and stated
+in `src/tvlab/screener/quality.py`.
+
+`GET /api/suggest` serves the same structure to the dashboard, through the same
+code path.
+
+> A ranked shortlist is not a recommendation. Nothing in this repository has been
+> validated as profitable - `tvlab study` is the authority on that, and its current
+> verdict is **NOT VALIDATED**.
 
 `tvlab study` writes `output/<strategy>_<market>_<tf>/` containing a markdown
 report, a machine-readable JSON, the trade log, the equity curve and six charts.

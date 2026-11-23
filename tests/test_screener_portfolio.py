@@ -81,13 +81,38 @@ def test_rank_puts_live_signals_first():
         ScanRow(symbol="C", signal=-1, reward_risk=4.0),
         ScanRow(symbol="D", signal=0, sweep_age=99.0, zones="-"),
     ]
-    live = rank(rows)
+    live = rank(rows, fee_bps=10.0, slippage_bps=5.0)
+    # Neither B nor C carries a stop, so neither can be cost-scored; they fall
+    # back to the raw ratio rather than to input order, which would make the
+    # shortlist arbitrary.
     assert [r.symbol for r in live] == ["C", "B"], "best R:R first"
-    everything = rank(rows, live_only=False)
+
+    everything = rank(rows, live_only=False, fee_bps=10.0, slippage_bps=5.0)
     assert everything[0].signal != 0
     # among non-live rows, the nearer setup comes first
     assert everything.index(next(r for r in everything if r.symbol == "A")) < \
            everything.index(next(r for r in everything if r.symbol == "D"))
+
+
+def test_rank_prefers_a_cost_scored_stop_over_a_bare_ratio():
+    """A row with a real stop is scored on expectancy after costs; a row with only
+    a ratio is not. The scored one must not lose to a bigger number it cannot
+    substantiate."""
+    bare = ScanRow(symbol="BARE", signal=1, reward_risk=9.0, last=float("nan"), stop=None)
+    stopped = ScanRow(symbol="STOPPED", signal=1, last=100.0, stop=98.0, target=104.0,
+                      reward_risk=2.0, trend=1, adx=30.0, atr_pct=2.0, bars=1200)
+    live = rank([bare, stopped], fee_bps=10.0, slippage_bps=5.0)
+    assert [r.symbol for r in live] == ["STOPPED", "BARE"]
+
+
+def test_rank_warns_when_a_live_signal_cannot_be_cost_scored(caplog):
+    """Silently ranking an unscorable row is how an arbitrary shortlist looks
+    authoritative. It has to say so."""
+    import logging
+    rows = [ScanRow(symbol="B", signal=1, reward_risk=2.0)]
+    with caplog.at_level(logging.WARNING):
+        rank(rows, fee_bps=10.0, slippage_bps=5.0)
+    assert any("no usable stop" in r.message for r in caplog.records)
 
 
 def test_summarize_counts(store):

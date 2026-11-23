@@ -169,6 +169,195 @@ def data(market, style, config, set_pairs, symbols, data_source, timeframe, limi
         console.print(f"\nexported {len(frames)} frames to {export}")
 
 
+# -------------------------------------------------------------------- suggest
+def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Read the win rate this strategy actually achieved, from the last study.
+
+    This is what turns a breakeven threshold into a decision. On its own, "you
+    need a 26.7% win rate" is just arithmetic; next to "you measured 38.5%, but
+    on 13 trades" it is an answer - and the sample size is the part that stops it
+    being over-read.
+    """
+    import json
+
+    strat = strategy_name or cfg.strategy.name
+    tf = cfg.timeframe.execution
+    candidates = [
+        REPO_ROOT / cfg.output.dir / f"{strat}_{cfg.universe.market}_{tf}" / f"{strat}_{cfg.universe.market}_report.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            d = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001 - a corrupt report must not kill the scan
+            continue
+        pm = d.get("portfolio_metrics") or {}
+        wr, n = pm.get("win_rate"), pm.get("n_trades")
+        if wr is None or not np.isfinite(wr):
+            continue
+        return {
+            "win_rate": float(wr), "n_trades": int(n or 0),
+            "payoff_ratio": pm.get("payoff_ratio"), "expectancy": pm.get("expectancy"),
+            "profit_factor": pm.get("profit_factor"),
+            "path": str(path), "created_at": d.get("created_at"),
+        }
+    return None
+
+
+@cli.command()
+@click.option("--market", default=None)
+@click.option("--style", default=None)
+@click.option("--config", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
+@click.option("--symbols", default=None)
+@click.option("--data-source", default=None,
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart"]))
+@click.option("--timeframe", default=None)
+@click.option("--top", type=int, default=10, help="how many candidates to show")
+@click.option("--max-breakeven", type=float, default=0.60, show_default=True,
+              help="reject anything needing a higher win rate than this to break even")
+@click.option("--trendlines", is_flag=True, default=False,
+              help="fit diagonal support/resistance and prefer structural stops")
+def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, top,
+            max_breakeven, trendlines) -> None:
+    """Rank the universe into a shortlist, best risk:reward after costs first.
+
+    This is the command to run when you want "what is the best idea right now".
+    It answers that question honestly, which means it ranks by **expectancy after
+    costs** rather than by the reward:risk ratio on paper.
+
+    Why that distinction is the whole point: reward:risk is a ratio of two
+    distances, so you can make it arbitrarily large by shrinking the stop. Sorting
+    by R:R therefore promotes the tightest stops - the ones ordinary noise hits -
+    and demotes the ideas that are actually tradeable. Every candidate below is
+    shown with its **breakeven win rate**: the win rate you must exceed to make
+    money at your configured fees and slippage. That number is arithmetic, not a
+    forecast, and it needs no assumption about the future.
+
+    Where a previous ``tvlab study`` exists for this market/style, its *measured*
+    win rate is printed alongside so you can compare the threshold against what
+    the strategy has actually done - with the trade count, because 38% on 13
+    trades is not 38%.
+
+    A shortlist is not a recommendation. Nothing here has been validated as
+    profitable; ``tvlab study`` is what decides that, and today it says NOT
+    VALIDATED.
+    """
+    from .data.store import DataStore
+    from .pipeline import build_strategy
+    from .screener import SCAN_BARS, scan_universe, suggest as build_suggestions, summarize
+
+    cfg = _cfg(market, style, config, set_pairs, data_source)
+    tf = timeframe or cfg.timeframe.execution
+    syms = _symbols_arg(cfg, symbols)
+
+    store = DataStore(cfg)
+    strat = build_strategy(cfg)
+    rows, errors = scan_universe(store, cfg, syms, strat=strat, timeframe=tf,
+                                 bars=SCAN_BARS, with_trendlines=trendlines)
+
+    res = build_suggestions(rows, fee_bps=cfg.costs.fee_bps, slippage_bps=cfg.costs.slippage_bps,
+                            min_stop_distance_pct=cfg.risk.min_stop_distance_pct,
+                            max_breakeven=max_breakeven)
+
+    rt = res["round_trip_cost_bps"]
+    console.print(f"\n[bold]Suggestions[/bold] - {cfg.strategy.name} on {tf} "
+                  f"({cfg.universe.market}/{cfg.style or style or 'default'})")
+    console.print(f"  round-trip cost {rt:.1f} bp  ·  scanned {len(rows)} symbols  ·  "
+                  f"{res['n_candidates']} candidate(s), {res['n_rejected']} rejected  ·  "
+                  f"max breakeven {max_breakeven * 100:.0f}%")
+
+    measured = _measured_win_rate(cfg, strat.name)
+    if measured:
+        n = measured["n_trades"]
+        caveat = ("[red]far too few trades to trust[/red]" if n < 30
+                  else "[yellow]thin sample[/yellow]" if n < 100 else "adequate sample")
+        pf = measured.get("profit_factor")
+        console.print(f"  measured on the last study: win rate "
+                      f"[bold]{measured['win_rate'] * 100:.1f}%[/bold] over {n} trades ({caveat})"
+                      + (f", profit factor {pf:.2f}" if pf else ""))
+        console.print(f"  [dim]{measured['path']}[/dim]")
+    else:
+        console.print("  [yellow]no previous study for this market/style - run "
+                      "`tvlab study` so the breakeven thresholds have something to be "
+                      "compared against[/yellow]")
+
+    if not res["candidates"]:
+        console.print("\n[bold yellow]Nothing qualifies.[/bold yellow]")
+        why = summarize(rows, errors)
+        console.print(f"  {why['live']} live signal(s) of {why['scanned']} scanned; "
+                      f"{res['n_rejected']} rejected by the cost/breakeven gate.")
+        for rej in res["rejected"][:top]:
+            console.print(f"    [dim]{rej['symbol']:<12} {rej['side']:<5} R:R {rej['rr']:.2f}"
+                          f"  - {'; '.join(rej['reasons'])}[/dim]")
+        console.print("\n  [dim]This is the normal state. A setup that requires bias + sweep +"
+                      " confirmation should not fire often, and an idea whose stop is so tight"
+                      " that costs eat the reward is not a worse version of a good idea - it is"
+                      " untradeable at these costs.[/dim]")
+        return
+
+    t = Table(title=f"Ranked by quality after {rt:.0f} bp round-trip cost")
+    for col, just in (("#", "right"), ("symbol", "left"), ("side", "left"), ("R:R", "right"),
+                      ("stop %", "right"), ("reward %", "right"), ("cost R", "right"),
+                      ("breakeven", "right"), ("no-cost", "right"), ("score", "right"),
+                      ("stop ATR", "right"), ("ADX", "right"), ("zone", "left")):
+        t.add_column(col, justify=just)
+
+    for i, c in enumerate(res["candidates"][:top], 1):
+        be = c.breakeven_win_rate
+        be_colour = "green" if be < 0.30 else ("yellow" if be < 0.45 else "red")
+        marker = ""
+        if measured:
+            marker = " [green]PASS[/green]" if measured["win_rate"] > be else " [red]FAIL[/red]"
+        t.add_row(
+            str(i), c.symbol, c.side, f"{c.rr:.2f}",
+            f"{c.risk_pct * 100:.2f}",
+            f"{c.reward_pct * 100:.2f}" if c.reward_pct is not None else "-",
+            f"{c.cost_in_r:.2f}" if np.isfinite(c.cost_in_r) else "inf",
+            f"[{be_colour}]{be * 100:.1f}%[/]{marker}",
+            f"{c.implied_win_rate_at_rr * 100:.1f}%",
+            f"{c.quality_score:.3f}",
+            f"{c.stop_atr_multiple:.2f}" if np.isfinite(c.stop_atr_multiple) else "-",
+            f"{c.adx:.1f}" if np.isfinite(c.adx) else "-",
+            "yes" if c.in_zone else "-",
+        )
+    console.print(t)
+
+    best = res["candidates"][0]
+    console.print(f"\n[bold]Top candidate: {best.symbol} {best.side}[/bold]  "
+                  f"entry ~{best.last:,.4g}  stop {best.stop:,.4g} ({best.risk_pct * 100:.2f}%)"
+                  + (f"  target {best.target:,.4g}" if best.target else ""))
+    for r in best.reasons:
+        console.print(f"  [green]+[/green] {r}")
+    for w in best.warnings:
+        console.print(f"  [yellow]![/yellow] {w}")
+    if measured:
+        gap = (measured["win_rate"] - best.breakeven_win_rate) * 100
+        verdict = ("clears it" if gap > 0 else "does NOT clear it")
+        console.print(f"  [bold]measured {measured['win_rate'] * 100:.1f}% vs breakeven "
+                      f"{best.breakeven_win_rate * 100:.1f}% -> {verdict} by {abs(gap):.1f} pts[/bold]")
+        if measured["n_trades"] < 30:
+            console.print(f"  [red]but that win rate comes from {measured['n_trades']} trades. "
+                          f"Below 30 the confidence interval is wide enough that this comparison "
+                          f"is not evidence - it is a prompt to gather more data.[/red]")
+
+    if res["rejected"]:
+        console.print(f"\n[dim]Rejected ({res['n_rejected']}):[/dim]")
+        for rej in res["rejected"][:top]:
+            console.print(f"  [dim]{rej['symbol']:<12} {rej['side']:<5} R:R {rej['rr']:.2f}"
+                          f"  breakeven {rej['breakeven_win_rate'] * 100:.0f}%"
+                          f"  - {'; '.join(rej['reasons'])}[/dim]")
+    if errors:
+        console.print(f"\n[yellow]{len(errors)} symbol(s) failed to load[/yellow]")
+
+    console.print("\n[dim]Position size, if you take it: risk_per_trade "
+                  f"{cfg.risk.risk_per_trade * 100:.2f}% of equity / stop distance "
+                  f"{best.risk_pct * 100:.2f}% = {cfg.risk.risk_per_trade / best.risk_pct * 100:.1f}% "
+                  f"of equity notional, capped at {cfg.risk.max_position_pct * 100:.0f}%.[/dim]")
+
+
 # ------------------------------------------------------------------------ scan
 @cli.command()
 @click.option("--market", default=None)
@@ -264,7 +453,8 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
     s = summarize(rows, errors)
     console.print(f"\n[bold]{s['live']} live signal(s)[/bold] of {s['scanned']} symbols scanned"
                   + (f" ({s['failed']} failed)" if s["failed"] else "") + ".")
-    for r in rank(rows):
+    for r in rank(rows, fee_bps=cfg.costs.fee_bps, slippage_bps=cfg.costs.slippage_bps,
+                  min_stop_distance_pct=cfg.risk.min_stop_distance_pct):
         side = "LONG " if r.signal > 0 else "SHORT"
         rr = f"  R:R {r.reward_risk:.2f}" if r.reward_risk is not None else ""
         console.print(f"  {side} {r.symbol}{rr}")

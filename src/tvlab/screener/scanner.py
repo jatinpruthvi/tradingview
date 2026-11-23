@@ -240,17 +240,56 @@ def scan_universe(store, cfg: AppConfig, symbols: Sequence[str],
     return rows, errors
 
 
-def rank(rows: Sequence[ScanRow], live_only: bool = True) -> List[ScanRow]:
+def rank(rows: Sequence[ScanRow], live_only: bool = True,
+         fee_bps: Optional[float] = None, slippage_bps: Optional[float] = None,
+         min_stop_distance_pct: float = 0.0015) -> List[ScanRow]:
     """Order rows by how actionable they are.
 
-    Live signals first, best reward:risk first. Symbols with no signal sort by
-    proximity to one - a fresh sweep on the trend side with price inside an
-    unmitigated zone is the nearest thing to a setup, and that is what a scanner
-    is for: a shortlist to look at, not a list of orders to place.
+    Live signals first, best *cost-aware* quality first. Symbols with no signal
+    sort by proximity to one - a fresh sweep on the trend side with price inside
+    an unmitigated zone is the nearest thing to a setup, and that is what a
+    scanner is for: a shortlist to look at, not a list of orders to place.
+
+    This used to sort live signals by ``reward_risk`` descending, which was
+    actively harmful: reward:risk is a ratio of two distances, so it can be made
+    arbitrarily large by shrinking the stop. "Highest R:R first" therefore
+    promoted the tightest stops - the ones ordinary noise hits - and put the
+    genuinely tradeable ideas further down the list. Ordering now goes through
+    :mod:`tvlab.screener.quality`, which weighs the ratio against what the costs
+    do to it in R terms. Pass ``fee_bps``/``slippage_bps`` from the config; without
+    them the ranking falls back to a cost-free score and says so in the log.
     """
+    from .quality import evaluate
+
+    scored: Dict[str, float] = {}
+    if fee_bps is None or slippage_bps is None:
+        log.warning("rank() called without cost parameters; scoring live signals "
+                    "without costs will favour tight stops. Pass cfg.costs.")
+        fee_bps = fee_bps or 0.0
+        slippage_bps = slippage_bps or 0.0
+    fallbacks = 0
+    for r in rows:
+        if r.signal != 0:
+            c = evaluate(r, fee_bps, slippage_bps, min_stop_distance_pct)
+            if c is not None:
+                scored[r.symbol] = c.quality_score
+            elif r.reward_risk and np.isfinite(r.reward_risk):
+                # A signal with no usable stop still has a ratio. Scoring it 0.0
+                # would make the ordering depend on input order, which is an
+                # arbitrary shortlist - so fall back to the raw ratio instead.
+                scored[r.symbol] = float(min(r.reward_risk, 4.0)) / 4.0 * 0.5
+                fallbacks += 1
+            else:
+                scored[r.symbol] = 0.0
+                fallbacks += 1
+    if fallbacks:
+        log.warning("%d live signal(s) had no usable stop and were ranked on their raw "
+                    "reward:risk alone, which ignores costs. `suggest` reports these "
+                    "separately rather than ranking them.", fallbacks)
+
     def key(r: ScanRow) -> Tuple[int, float, float]:
         if r.signal != 0:
-            return (0, -(r.reward_risk or 0.0), 0.0)
+            return (0, -scored.get(r.symbol, 0.0), 0.0)
         # not live: rank by setup proximity
         age = r.sweep_age if r.sweep_age is not None else 999.0
         proximity = (1.0 if r.zones != "-" else 0.0) + (1.0 if age <= 6 else 0.0)

@@ -396,7 +396,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                                      with_trendlines=trendlines)
 
         payload = []
-        for r in rank(rows, live_only=False):
+        for r in rank(rows, live_only=False, fee_bps=c.costs.fee_bps,
+                      slippage_bps=c.costs.slippage_bps,
+                      min_stop_distance_pct=c.risk.min_stop_distance_pct):
             d = r.to_dict()
             # `rr` is the key the frontend has always read; keep it as an alias
             # rather than forcing a coordinated change in two places.
@@ -411,6 +413,76 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             "timeframe": c.timeframe.execution,
             "live_signals": s["live"],
             "summary": s,
+        })
+
+    # ----------------------------------------------------------------- suggest
+    @app.get("/api/suggest")
+    def api_suggest(
+        symbols: Optional[str] = Query(None),
+        timeframe: Optional[str] = Query(None),
+        top: Optional[int] = Query(None, ge=1, le=500),
+        trendlines: bool = Query(True, description="fit diagonal support/resistance"),
+        max_breakeven: float = Query(0.60, ge=0.05, le=1.0),
+    ) -> Dict[str, Any]:
+        """Ranked shortlist, best risk:reward *after costs* first.
+
+        Same code path as ``tvlab suggest`` - :mod:`tvlab.screener.quality` - so the
+        dashboard and the terminal cannot disagree about which idea is best. Both
+        delegate to ``scan_universe``, which is the arrangement that stopped the two
+        scan implementations from drifting apart.
+
+        Every candidate carries its ``breakeven_win_rate``: the win rate needed to
+        make money at the configured fee and slippage. That number is arithmetic on
+        the stop distance and the fee schedule, not a forecast. ``measured`` is the
+        win rate this strategy actually achieved in the most recent study, with its
+        trade count, so the two can be compared - and so the sample size stops the
+        comparison being over-read.
+        """
+        from ..screener import SCAN_BARS, scan_universe
+        from ..screener.quality import suggest as build_suggestions
+
+        c = state.cfg
+        if timeframe:
+            c = c.merge({"timeframe.execution": timeframe})
+        syms = ([s.strip() for s in symbols.split(",")] if symbols
+                else list(c.universe.symbols))
+        if top:
+            syms = syms[:top]
+
+        store = DataStore(c)
+        rows, errors = scan_universe(store, c, syms, strat=build_strategy(c),
+                                     timeframe=c.timeframe.execution, bars=SCAN_BARS,
+                                     with_trendlines=trendlines)
+        res = build_suggestions(rows, fee_bps=c.costs.fee_bps, slippage_bps=c.costs.slippage_bps,
+                                min_stop_distance_pct=c.risk.min_stop_distance_pct,
+                                max_breakeven=max_breakeven)
+
+        measured = None
+        try:
+            from ..cli import _measured_win_rate
+
+            measured = _measured_win_rate(c, c.strategy.name)
+        except Exception as exc:  # noqa: BLE001 - a missing report is not an API failure
+            log.debug("no measured win rate available: %s", exc)
+
+        return _json_safe({
+            "candidates": [x.to_dict() for x in res["candidates"]],
+            "rejected": res["rejected"],
+            "unscoreable": res["unscoreable"],
+            "n_candidates": res["n_candidates"],
+            "n_rejected": res["n_rejected"],
+            "round_trip_cost_bps": res["round_trip_cost_bps"],
+            "max_breakeven": res["max_breakeven"],
+            "weights": res["weights"],
+            "measured": measured,
+            "strategy": c.strategy.name,
+            "timeframe": c.timeframe.execution,
+            "market": c.universe.market,
+            "scanned": len(rows),
+            "errors": [{"symbol": k, "error": v} for k, v in errors.items()],
+            "note": ("A ranked shortlist is not a recommendation. Nothing here has been "
+                     "validated as profitable; `tvlab study` decides that, and its current "
+                     "verdict is NOT VALIDATED."),
         })
 
     # ------------------------------------------------------------------ report
