@@ -81,6 +81,7 @@
     <label class="mut">Symbol</label><select id="symbol"></select>
   </div>
   <div class="row" style="margin-left:auto">
+    <button id="btnSuggest" class="primary">Suggest</button>
     <button id="btnScan">Scan</button>
     <button id="btnRun" class="primary">Run backtest</button>
     <button id="btnReport">Load report</button>
@@ -107,6 +108,11 @@
     <div class="card">
       <h2>Portfolio equity</h2>
       <div class="body"><div id="equitychart"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Suggestions — ranked by R:R after costs</h2>
+      <div class="body scroll"><div id="suggestTable" class="mut">Press “Suggest”.</div></div>
     </div>
 
     <div class="card">
@@ -158,6 +164,11 @@ const $ = (id) => document.getElementById(id);
 const state = { cfg:null, chart:null, candle:null, volume:null, rsiChart:null, rsiLine:null,
                 eqChart:null, eqLine:null, series:[], markers:[] };
 
+// reasons and warnings come from our own code but carry user-visible text
+const escapeHtml = (t)=> String(t==null?'':t)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;');
+
 const fmt = (v,d=2)=> (v===null||v===undefined||Number.isNaN(v)) ? '—'
         : Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 const pct = (v,d=2)=> (v===null||v===undefined||Number.isNaN(v)) ? '—' : `${fmt(v,d)}%`;
@@ -190,6 +201,7 @@ async function boot(){
     $(id).addEventListener('change', onConfigChange);
   $('symbol').addEventListener('change', ()=>loadChart());
   $('btnRun').addEventListener('click', runBacktest);
+  $('btnSuggest').addEventListener('click', runSuggest);
   $('btnScan').addEventListener('click', runScan);
   $('btnReport').addEventListener('click', loadReport);
   await loadChart();
@@ -425,6 +437,89 @@ function renderBreakdown(m){
 }
 
 // ------------------------------------------------------------------------ scan
+async function runSuggest(){
+  busy(true);
+  try{
+    const tf = $('timeframe').value;
+    const r = await api(`/api/suggest?timeframe=${tf}&trendlines=1`);
+
+    let h = `<div class="note" style="margin-bottom:8px">
+      round-trip cost <b>${fmt(r.round_trip_cost_bps,1)} bp</b> · scanned
+      ${r.scanned} symbols · ${r.n_candidates} candidate(s), ${r.n_rejected} rejected
+      · breakeven gate ${Math.round(r.max_breakeven*100)}%</div>`;
+
+    // The measured win rate is what turns the breakeven from a threshold into a
+    // decision. It comes from the last study, so its sample size is stated too:
+    // 38% over 13 trades is not 38%.
+    const m = r.measured;
+    if(m && m.win_rate!=null){
+      const n = m.n_trades||0;
+      const trust = n<30 ? 'far too few trades to trust'
+                  : n<100 ? 'thin sample' : 'adequate sample';
+      h += `<div class="note" style="margin-bottom:10px">measured on the last study:
+            win rate <b>${fmt(m.win_rate*100,1)}%</b> over ${n} trades
+            (${trust})${m.profit_factor!=null?` · profit factor ${fmt(m.profit_factor,2)}`:''}
+            <br><span class="mut">${m.path||''}</span></div>`;
+    } else {
+      h += `<div class="note" style="margin-bottom:10px">no previous study on record —
+            run <code>tvlab study --market ${r.market}</code> to get a win rate to
+            compare these breakeven thresholds against.</div>`;
+    }
+
+    if(!r.candidates.length){
+      h += `<div class="note">Nothing qualifies right now. This is the normal state
+            of a market, not a failure of the scan.</div>`;
+      for(const x of (r.rejected||[]))
+        h += `<div class="note" style="margin-top:6px"><b>${x.symbol}</b> rejected —
+              ${x.reasons.map(e=>escapeHtml(e)).join('; ')}</div>`;
+      // Parenthesised deliberately: `h + r.note ? a : b` parses as
+      // `(h + r.note) ? a : b`, and a concatenated string is always truthy, so the
+      // fallback branch is dead and a missing note renders the word "undefined".
+      $('suggestTable').innerHTML = h + (r.note
+        ? `<div class="note" style="margin-top:10px">${r.note}</div>` : '');
+      return;
+    }
+
+    h += '<table><tr><th>#</th><th>Symbol</th><th>Side</th><th>Last</th><th>Stop</th>'
+       + '<th>Target</th><th>R:R</th><th>stop%</th><th>cost in R</th>'
+       + '<th>breakeven</th><th>vs measured</th><th>score</th><th>verdict</th></tr>';
+
+    r.candidates.forEach((x,i)=>{
+      // PASS means the strategy's own recorded win rate clears what this idea needs.
+      const pass = (m && m.win_rate!=null) ? m.win_rate > x.breakeven_win_rate : null;
+      const verdict = pass===null ? '<span class="mut">no study</span>'
+                    : pass ? '<span class="pill long">PASS</span>'
+                           : '<span class="pill short">FAIL</span>';
+      h += `<tr><td>${i+1}</td><td><b>${x.symbol}</b></td>
+            <td>${x.side==='long'?'<span class="pos">long</span>':'<span class="neg">short</span>'}</td>
+            <td>${fmt(x.last,4)}</td><td>${fmt(x.stop,4)}</td><td>${fmt(x.target,4)}</td>
+            <td>${fmt(x.rr,2)}</td><td>${fmt(x.risk_pct*100,2)}</td>
+            <td>${fmt(x.cost_in_r,2)}</td>
+            <td><b>${fmt(x.breakeven_win_rate*100,1)}%</b>
+                <span class="mut">(${fmt(x.implied_win_rate_at_rr*100,1)}% free)</span></td>
+            <td>${verdict}</td><td>${fmt(x.quality_score,3)}</td>
+            <td class="mut">${String(x.verdict||'—').replace(/_/g,' ')}</td></tr>`;
+    });
+    $('suggestTable').innerHTML = h + '</table>';
+
+    // The best idea in full, with the reasons behind its score and the warnings
+    // that came with it - a number with no stated basis is not a suggestion.
+    const top = r.candidates[0];
+    let d = `<div class="note" style="margin-top:12px"><b>Top candidate: ${top.symbol}
+             ${top.side}</b> — entry ~${fmt(top.last,4)}, stop ${fmt(top.stop,4)}
+             (${fmt(top.risk_pct*100,2)}%), target ${fmt(top.target,4)}.
+             Position size from the mandate: <b>${fmt(Math.min(
+               (state.cfg.risk.risk_per_trade||0.005)/Math.max(top.risk_pct,1e-9),
+               state.cfg.risk.max_position_pct||0.25)*100,1)}%</b> of equity notional.</div>`;
+    for(const w of (top.warnings||[])) d += `<div class="note" style="margin-top:4px">⚠ ${escapeHtml(w)}</div>`;
+    for(const x of (r.rejected||[]))
+      d += `<div class="note" style="margin-top:6px"><b>${x.symbol}</b> rejected —
+            ${x.reasons.map(e=>escapeHtml(e)).join('; ')}</div>`;
+    d += `<div class="note" style="margin-top:10px">${r.note}</div>`;
+    $('suggestTable').insertAdjacentHTML('beforeend', d);
+  }catch(e){ showErr('suggestTable', e) } finally { busy(false) }
+}
+
 async function runScan(){
   busy(true);
   try{

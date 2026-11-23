@@ -110,6 +110,10 @@ class Candidate:
         d = {k: v for k, v in self.__dict__.items()}
         d["reasons"] = list(self.reasons)
         d["warnings"] = list(self.warnings)
+        # `verdict` is a property, and __dict__ holds only fields, so it would
+        # silently vanish from every serialised candidate - and the dashboard
+        # reads it. Properties have to be added by hand.
+        d["verdict"] = self.verdict
         return d
 
     @property

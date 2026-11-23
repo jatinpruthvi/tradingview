@@ -356,6 +356,33 @@ def test_suggest_reports_the_cost_basis_it_used():
     assert res["weights"] == WEIGHTS
 
 
+def test_to_dict_includes_the_verdict_property():
+    """`verdict` is a property, and __dict__ holds only dataclass fields, so it
+    vanishes from the serialised candidate unless it is added by hand. The
+    dashboard reads it - this is the regression test for that bug."""
+    c = evaluate(_row("X", last=100.0, stop=98.0, target=104.0), CRYPTO_FEE, CRYPTO_SLIP)
+    d = c.to_dict()
+    assert "verdict" in d
+    assert d["verdict"] == c.verdict
+    import json
+    json.dumps(d)  # must survive the wire, not just exist in Python
+
+
+def test_to_dict_survives_json_for_a_rejected_candidate():
+    """The rejected pile is serialised too, and carries a different shape."""
+    import json
+    res = suggest([_row("HAIR", last=100.0, stop=99.95, target=100.20)],
+                  CRYPTO_FEE, CRYPTO_SLIP)
+    assert res["n_rejected"] == 1
+    payload = json.loads(json.dumps({
+        "candidates": [c.to_dict() for c in res["candidates"]],
+        "rejected": res["rejected"],
+        "unscoreable": res["unscoreable"],
+    }, default=str))
+    assert payload["rejected"][0]["symbol"] == "HAIR"
+    assert payload["rejected"][0]["reasons"]
+
+
 def test_suggest_max_breakeven_is_a_gate_not_a_sort_key():
     loose = suggest([_row("X", last=100.0, stop=99.80, target=101.60)],
                     CRYPTO_FEE, CRYPTO_SLIP, max_breakeven=0.99)
