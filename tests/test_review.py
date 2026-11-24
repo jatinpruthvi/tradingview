@@ -604,7 +604,7 @@ def test_every_outcome_the_scorer_can_produce_is_in_the_vocabulary():
     """
     import re
     src = (Path(__file__).resolve().parents[1] / "src" / "tvlab" / "screener"
-           / "review.py").read_text()
+           / "review.py").read_text(encoding="utf-8")
     assigned = set(re.findall(r's\.outcome\s*(?:,\s*s\.exit_price)?\s*=\s*"(\w+)"', src))
     assert assigned, "the regex found no outcome assignments; it needs updating"
     assert assigned <= OUTCOMES, f"score_one assigns states outside OUTCOMES: {assigned - OUTCOMES}"

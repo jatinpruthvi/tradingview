@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from _nse_payloads import _all_indices_payload
 
+from tvlab import cli as cli_mod
 from tvlab.cli import cli
 from tvlab.data import nse as nse_mod
 from tvlab.data.nse import NseSource
@@ -44,6 +45,18 @@ class _FrozenDateTime:
 def no_sleep(monkeypatch):
     """TVLAB_HTTP_DELAY exists so politeness is tunable without editing code."""
     monkeypatch.setenv("TVLAB_HTTP_DELAY", "0")
+
+
+@pytest.fixture(autouse=True)
+def pinned_console_width(monkeypatch):
+    """Pin the rich console width for these tests.
+
+    The breadth table carries more columns than an 80-column terminal holds, and
+    rich truncates cell text to the console width - at 80 columns "NIFTY BANK"
+    renders as an ellipsis and the assertions below would be testing the width
+    of whatever terminal ran pytest rather than what the table contains.
+    """
+    monkeypatch.setattr(cli_mod.console, "_width", 140, raising=False)
 
 
 @pytest.fixture

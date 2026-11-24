@@ -90,7 +90,7 @@ def outage_payload():
 
 @pytest.fixture(scope="module")
 def script_body():
-    html = INDEX.read_text()
+    html = INDEX.read_text(encoding="utf-8")
     m = re.search(r"<script>(.*)</script>", html, re.S)
     assert m, "no inline script in index.html"
     return m.group(1)
@@ -220,7 +220,7 @@ def test_data_failure_is_distinguished_from_a_quiet_market(script_body):
 
 
 def test_the_panel_and_button_exist_and_are_wired():
-    html = INDEX.read_text()
+    html = INDEX.read_text(encoding="utf-8")
     assert 'id="btnDaily"' in html
     assert 'id="dailyTable"' in html
     assert "$('btnDaily').addEventListener('click', runDaily)" in html

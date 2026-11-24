@@ -75,7 +75,7 @@ def _reference_importers() -> Set[str]:
     found: Set[str] = set()
     for f in sorted(SRC.rglob("*.py")):
         rel = str(f.relative_to(SRC)).replace("\\", "/")
-        mods = _imported_modules(ast.parse(f.read_text()))
+        mods = _imported_modules(ast.parse(f.read_text(encoding="utf-8")))
         for m in mods:
             if m in BLOCKED or m.endswith(".reference") or m == "reference":
                 # `reference` is a common word; only count it where it resolves to
@@ -103,7 +103,7 @@ def test_only_the_allowed_modules_import_the_quarantined_reference():
 
 def test_pipeline_import_is_conditional_and_report_only():
     """The engine's import is inside `if cross_validate:` and lands in the report."""
-    src = (SRC / "pipeline.py").read_text()
+    src = (SRC / "pipeline.py").read_text(encoding="utf-8")
     assert "from .indicators.reference import run_all" in src
     tree = ast.parse(src)
     top_level = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]

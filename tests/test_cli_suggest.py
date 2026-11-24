@@ -253,7 +253,7 @@ def _write_report(tmp_path, monkeypatch, portfolio_metrics, market="crypto",
     d.mkdir(parents=True)
     path = d / f"{strat}_{market}_report.json"
     path.write_text(json.dumps({"portfolio_metrics": portfolio_metrics,
-                                "created_at": "2026-11-23T09:00:00"}))
+                                "created_at": "2026-11-23T09:00:00"}), encoding="utf-8")
     monkeypatch.setattr("tvlab.cli.REPO_ROOT", tmp_path)
     cfg = load_config(market=market, style="swing")
     return _measured_win_rate(cfg, strat), path
@@ -288,7 +288,7 @@ def test_measured_win_rate_status_corrupt(tmp_path, monkeypatch):
 
     d = tmp_path / "output" / "smc_trend_crypto_4h"
     d.mkdir(parents=True)
-    (d / "smc_trend_crypto_report.json").write_text("{not json")
+    (d / "smc_trend_crypto_report.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setattr("tvlab.cli.REPO_ROOT", tmp_path)
     m = _measured_win_rate(load_config(market="crypto", style="swing"), "smc_trend")
     assert m["status"] == "corrupt"
@@ -374,7 +374,7 @@ def test_measured_win_rate_survives_a_corrupt_report(tmp_path, monkeypatch):
     cfg = load_config(market="crypto", style="swing")
     d = tmp_path / "smc_trend_crypto_4h"
     d.mkdir(parents=True)
-    (d / "smc_trend_crypto_report.json").write_text("{not json")
+    (d / "smc_trend_crypto_report.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setattr("tvlab.cli.REPO_ROOT", tmp_path)
     assert _measured_win_rate(cfg, "smc_trend") is None
 

@@ -232,7 +232,9 @@ def test_unresolvable_csv_root_falls_through_to_the_configured_path(tmp_path,
     assert _csv_root(cfg) == tmp_path / "wanted" / "here"
     with pytest.raises(DataError) as exc:
         CsvSource(_csv_root(cfg))
-    assert "wanted/here" in str(exc.value)
+    # The message names the configured path; on Windows it renders with
+    # backslashes, so compare on a normalised separator.
+    assert "wanted/here" in str(exc.value).replace("\\", "/")
 
 
 def test_store_dispatches_to_csv_with_the_configured_root(exported):

@@ -59,7 +59,7 @@ def suggest_payload():
 
 @pytest.fixture(scope="module")
 def script_body():
-    html = INDEX.read_text()
+    html = INDEX.read_text(encoding="utf-8")
     m = re.search(r"<script>(.*)</script>", html, re.S)
     assert m, "no inline script in index.html"
     return m.group(1)
@@ -237,7 +237,7 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
     assert "__PAYLOAD__" not in harness
 
     script = tmp_path / "harness.js"
-    script.write_text(harness)
+    script.write_text(harness, encoding="utf-8")
     r = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, f"node crashed: {r.stderr[:800]}"
 
@@ -317,6 +317,6 @@ state.cfg = {risk:{risk_per_trade:0.005, max_position_pct:0.25}};
 @requires_node
 def test_index_html_is_syntactically_valid_javascript(script_body, tmp_path):
     script = tmp_path / "page.js"
-    script.write_text(script_body)
+    script.write_text(script_body, encoding="utf-8")
     r = subprocess.run([node, "--check", str(script)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[:800]

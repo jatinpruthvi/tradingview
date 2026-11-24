@@ -146,7 +146,7 @@ def test_the_written_report_json_carries_the_verdict(tmp_path):
     study = run_study(cfg, with_benchmark=False, cross_validate=False)
     paths = write_report(study, tmp_path, plots=False)
 
-    payload = json.loads(paths["json"].read_text())
+    payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert "verdict" in payload, "the verdict is still markdown-only"
     v = payload["verdict"]
     assert v["verdict"] in {"NOT VALIDATED", "PARTIAL", "PASSES ON THIS DATA"}
@@ -154,5 +154,5 @@ def test_the_written_report_json_carries_the_verdict(tmp_path):
     assert all(isinstance(c["passed"], bool) or c["passed"] is None
                for c in v["checks"])
     # and it agrees with the markdown that sits next to it
-    md = paths["markdown"].read_text()
+    md = paths["markdown"].read_text(encoding="utf-8")
     assert f"## Verdict: **{v['verdict']}**" in md

@@ -283,7 +283,7 @@ def test_the_journal_appends_one_line_per_run_and_is_newest_first(tmp_path):
     jp = append_journal(b1, tmp_path)
     append_journal(b2, tmp_path)
     assert jp == journal_path(tmp_path)
-    lines = jp.read_text().strip().splitlines()
+    lines = jp.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     got = read_journal(tmp_path)
     assert [g["as_of"] for g in got] == ["2026-11-24", "2026-11-23"]
@@ -304,7 +304,7 @@ def test_the_dated_file_holds_the_full_briefing(tmp_path):
     append_journal(b, tmp_path)
     day = tmp_path / "daily" / "2026-11-24.json"
     assert day.exists()
-    d = json.loads(day.read_text())
+    d = json.loads(day.read_text(encoding="utf-8"))
     assert d["shortlist"][0]["symbol"] == "AAPL"
     assert d["advisory"]
 
@@ -323,7 +323,7 @@ def test_a_corrupt_journal_line_is_skipped_not_fatal(tmp_path):
     jp = journal_path(tmp_path)
     jp.parent.mkdir(parents=True, exist_ok=True)
     jp.write_text('{"as_of": "2026-11-22", "outcome": "shortlist"}\nNOT JSON\n'
-                  '{"as_of": "2026-11-23", "outcome": "no_signals"}\n')
+                  '{"as_of": "2026-11-23", "outcome": "no_signals"}\n', encoding="utf-8")
     got = read_journal(tmp_path)
     assert [g["as_of"] for g in got] == ["2026-11-23", "2026-11-22"]
 
@@ -335,7 +335,7 @@ def test_reading_a_journal_that_does_not_exist_is_empty_not_an_error(tmp_path):
 def test_an_unwritable_journal_does_not_abort_the_briefing(tmp_path, monkeypatch):
     b = build_briefing([_row("AAPL")], {}, _cfg(), as_of="2026-11-24")
     blocked = tmp_path / "blocked"
-    blocked.write_text("i am a file, not a directory")
+    blocked.write_text("i am a file, not a directory", encoding="utf-8")
     # mkdir(parents=True) over an existing *file* raises, which is the failure mode
     # that must not take the user's shortlist down with it
     with pytest.raises(OSError):

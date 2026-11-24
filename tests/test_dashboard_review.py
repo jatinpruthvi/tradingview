@@ -34,7 +34,7 @@ APP = REPO_ROOT / "src" / "tvlab" / "dashboard" / "app.py"
 
 @pytest.fixture(scope="module")
 def script_body():
-    html = INDEX.read_text()
+    html = INDEX.read_text(encoding="utf-8")
     m = re.search(r"<script>(.*)</script>", html, re.S)
     assert m, "no inline script in index.html"
     return m.group(1)
@@ -59,7 +59,7 @@ def review_fn(script_body):
 
 @pytest.fixture(scope="module")
 def endpoint_source():
-    src = APP.read_text()
+    src = APP.read_text(encoding="utf-8")
     start = src.index("def api_review(")
     end = src.index("# ------------------------------------------------------------------ report",
                     start)
@@ -274,7 +274,7 @@ def test_the_endpoint_delegates_to_the_shared_scorer_and_fetcher(endpoint_source
 
 
 def test_cli_and_endpoint_use_the_same_horizon_default(endpoint_source):
-    src = (REPO_ROOT / "src" / "tvlab" / "cli.py").read_text()
+    src = (REPO_ROOT / "src" / "tvlab" / "cli.py").read_text(encoding="utf-8")
     cli_default = re.search(r'@click\.option\("--horizon", type=int, default=(\d+)', src)
     api_default = re.search(r'horizon: int = Query\((\d+)', endpoint_source)
     assert cli_default and api_default, "a horizon default was not found"

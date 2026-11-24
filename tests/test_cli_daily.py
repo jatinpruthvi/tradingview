@@ -129,7 +129,7 @@ def test_an_unvalidated_study_is_named_above_the_list(runner, patch_scan,
         "portfolio_metrics": {"win_rate": 0.29, "n_trades": 31},
         "verdict": {"verdict": "NOT VALIDATED", "n_passed": 3, "n_checks": 8,
                     "checks": [{"check": "Deflated Sharpe", "passed": False}]},
-    }))
+    }), encoding="utf-8")
     patch_scan([_row("AAPL")])
     patch_fundamentals({"AAPL": _snap("AAPL")})
     res = runner.invoke(cli, ["daily", "--market", "us_equities", "--style", "swing"])
@@ -243,7 +243,7 @@ def test_the_journal_is_written_to_the_configured_output_dir(runner, patch_scan,
     assert res.exit_code == 0, res.output
     jp = isolated_output / "output" / "daily" / "journal.jsonl"
     assert jp.exists(), "the daily run must be journaled by default"
-    line = json.loads(jp.read_text().strip())
+    line = json.loads(jp.read_text(encoding="utf-8").strip())
     assert line["market"] == "us_equities"
     assert line["n_shortlist"] == 1
     assert line["shortlist"][0]["symbol"] == "AAPL"
@@ -270,7 +270,7 @@ def test_a_quiet_day_is_still_journaled(runner, patch_scan, patch_fundamentals,
     assert res.exit_code == 0
     jp = isolated_output / "output" / "daily" / "journal.jsonl"
     assert jp.exists()
-    assert json.loads(jp.read_text().strip())["outcome"] == "no_signals"
+    assert json.loads(jp.read_text(encoding="utf-8").strip())["outcome"] == "no_signals"
 
 
 # -------------------------------------------------------------------- rendering
@@ -311,7 +311,7 @@ def test_top_truncates_the_shortlist(runner, patch_scan, patch_fundamentals,
                               "--top", "2"])
     assert res.exit_code == 0, res.output
     jp = isolated_output / "output" / "daily" / "journal.jsonl"
-    assert json.loads(jp.read_text().strip())["n_shortlist"] == 2
+    assert json.loads(jp.read_text(encoding="utf-8").strip())["n_shortlist"] == 2
 
 
 def test_position_sizing_follows_the_risk_mandate(runner, patch_scan,

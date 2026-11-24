@@ -461,7 +461,7 @@ def test_set_cannot_reach_the_tolerance_and_the_docs_say_so(runner, isolated_out
     assert d["entry_tolerance"] == pytest.approx(0.005), "--set changed the tolerance"
     assert d["rows"][0]["outcome"] == "unscorable", "--set appeared to take effect"
 
-    readme = (REPO_ROOT / "README.md").read_text()
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "--entry-tolerance" in readme, "the README must name the flag that exists"
     assert "silent no-op" in readme, \
         "the README should warn that --set cannot reach this"
@@ -577,7 +577,7 @@ def test_the_unbacked_scoring_claim_is_gone_from_every_site():
         "dashboard/static/index.html": REPO_ROOT / "dashboard" / "static" / "index.html",
     }
     for name, path in sites.items():
-        text = _flat(path.read_text())
+        text = _flat(path.read_text(encoding="utf-8"))
         assert banned not in text.lower(), f"{name} still carries the unbacked claim"
 
 
@@ -588,11 +588,11 @@ def test_the_sites_that_promise_scoring_now_name_the_command():
         "dashboard/static/index.html": REPO_ROOT / "dashboard" / "static" / "index.html",
     }
     for name, path in sites.items():
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert "review" in text.lower(), f"{name} never mentions the review capability"
     # The command itself must be spelled out where a reader would go looking for it.
-    assert "tvlab review" in (REPO_ROOT / "README.md").read_text()
-    assert "tvlab review" in (REPO_ROOT / "src" / "tvlab" / "cli.py").read_text()
+    assert "tvlab review" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "tvlab review" in (REPO_ROOT / "src" / "tvlab" / "cli.py").read_text(encoding="utf-8")
 
 
 def test_the_daily_command_points_at_the_review_command(runner, isolated_output,
@@ -621,7 +621,7 @@ def test_the_daily_command_points_at_the_review_command(runner, isolated_output,
 def test_the_daily_docstring_does_not_reference_a_module_that_does_not_exist():
     """`journal.py` was cited for years and never existed; the journal functions live
     in `daily.py`. Every module a docstring names must be importable."""
-    text = (REPO_ROOT / "src" / "tvlab" / "screener" / "daily.py").read_text()
+    text = (REPO_ROOT / "src" / "tvlab" / "screener" / "daily.py").read_text(encoding="utf-8")
     assert "``journal.py``" not in text
     for mod in re.findall(r"``screener/(\w+)\.py``", text):
         assert (REPO_ROOT / "src" / "tvlab" / "screener" / f"{mod}.py").exists(), \
