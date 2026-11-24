@@ -387,8 +387,6 @@ DEFAULT_BASKET: Dict[str, Dict[str, object]] = {
                          market="india", base_volume=3_400_000),
     "LT.NS": dict(start_price=3_200, regime_mix=(0.36, 0.24, 0.40), tail_df=5.0,
                   market="india", base_volume=2_800_000),
-    "TATAMOTORS.NS": dict(start_price=650, regime_mix=(0.38, 0.30, 0.32), tail_df=4.5,
-                          market="india", base_volume=13_000_000),
     "BAJFINANCE.NS": dict(start_price=6_900, regime_mix=(0.32, 0.30, 0.38), tail_df=4.5,
                           market="india", base_volume=1_600_000),
     # --- FX / metals: mean-reverting, tight ranges
