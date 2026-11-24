@@ -18,7 +18,10 @@ universe:
   - BHARTIARTL.NS
   - KOTAKBANK.NS
   - LT.NS
-  - TATAMOTORS.NS
+  # TATAMOTORS was renamed TMPV on 2025-10-24 (NSE circular CML/70875); the CV
+  # business demerged out and listed separately as TMCV on 2025-11-12, so TMPV
+  # is the successor of this line and keeps the price history.
+  - TMPV.NS
   - BAJFINANCE.NS
   min_quote_volume: 1000000
   max_symbols: 12

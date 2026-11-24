@@ -57,12 +57,14 @@ log = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 
-#: NSE and Yahoo both reject the default urllib agent. market-lab uses a bare
-#: "Mozilla/5.0"; a fuller string is less likely to be fingerprinted.
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0 Safari/537.36"
-)
+#: NSE and Yahoo both reject the default urllib agent, but Yahoo rejects a
+#: *full browser* string outright: with a Chrome/120 User-Agent its chart
+#: endpoint answers HTTP 429 "Too Many Requests" for every symbol, while the
+#: same URL with a bare "Mozilla/5.0" answers 200 - measured on 2026-11-24
+#: against 12 NSE tickers in a row, all 200 except one 404 for a delisted
+#: ticker. The bare string from market-lab is what actually works; a more
+#: convincing-looking one is the failure. NSE's own endpoints accept both.
+USER_AGENT = "Mozilla/5.0"
 
 #: Regular session in IST, as minutes from midnight: 09:15 to 15:30.
 SESSION_START_MIN = 9 * 60 + 15

@@ -27,6 +27,8 @@ import pytest
 from tvlab.config import FundamentalsConfig
 from tvlab.data.base import DataError
 from tvlab.data.fundamentals import (
+    _tv_names,
+    MARKET_CURRENCY,
     FIELD_CANDIDATES,
     FundamentalSnapshot,
     build_snapshots,
@@ -189,7 +191,8 @@ def test_snapshots_parse_a_frame_keyed_by_field_name():
         "name": ["RELIANCE", "TCS"],
         "market_cap_basic": [1.2e13, 9.8e12],
         "price_earnings_ttm": [24.5, 31.2],
-        "return_on_equity": [0.22, 0.45],
+        # Percentages, as the scanner actually sends them: 22.0 means 22%.
+        "return_on_equity": [22.0, 45.0],
         "earnings_release_next_date": ["2026-04-18", "2026-04-11"],
     })
     resolved = {"name": _F("name", "Name"), "market_cap": _F("market_cap_basic", "Market Capitalization"),
@@ -219,6 +222,51 @@ def test_snapshots_parse_a_frame_keyed_by_label():
     s = build_snapshots(df, resolved)["INFY"]
     assert s.market_cap == pytest.approx(6.5e12)
     assert s.pe_ttm == pytest.approx(27.1)
+
+
+def test_scanner_percentages_are_stored_as_fractions():
+    """The scanner reports ROE, margins, growth and yield as percentages.
+
+    Live RELIANCE, 2026-11-24: ``return_on_equity`` 9.0147 and
+    ``dividend_yield`` 0.4436, i.e. 9.01% and 0.44%. The market config gates on
+    fractions (``min_roe: 0.15`` is 15%) and the briefing table prints
+    ``roe * 100``, so a raw percentage makes a 9% company pass a 15% gate and
+    display as 901%. This pins the divide at the parse boundary, and pins that
+    the ratio fields next to them are left alone: applying the scale to P/E
+    would make every company look 100x cheaper.
+    """
+    df = _frame({
+        "name": ["RELIANCE"],
+        "return_on_equity": [9.0147],
+        "operating_margin": [11.2129],
+        "revenue_growth_yoy": [19.9478],
+        "dividend_yield": [0.4436],
+        "price_earnings_ttm": [22.2662],
+        "price_to_book": [1.9381],
+        "debt_to_equity": [0.4292],
+    })
+    resolved = {
+        "name": _F("name", "Name"),
+        "roe": _F("return_on_equity", "Return on Equity (TTM)"),
+        "operating_margin": _F("operating_margin", "Operating Margin (TTM)"),
+        "revenue_growth_yoy": _F("revenue_growth_yoy", "Revenue (TTM YoY Growth)"),
+        "dividend_yield": _F("dividend_yield", "Dividend Yield % (Current)"),
+        "pe_ttm": _F("price_earnings_ttm", "Price to Earnings Ratio (TTM)"),
+        "price_to_book": _F("price_to_book", "Price to Book (MRQ)"),
+        "debt_to_equity": _F("debt_to_equity", "Debt to Equity FQ"),
+    }
+    s = build_snapshots(df, resolved)["RELIANCE"]
+
+    assert s.roe == pytest.approx(0.090147)
+    assert s.operating_margin == pytest.approx(0.112129)
+    assert s.revenue_growth_yoy == pytest.approx(0.199478)
+    assert s.dividend_yield == pytest.approx(0.004436)
+
+    # Ratios must survive untouched: dividing a P/E by 100 would make every
+    # company look cheap, which is the same class of error pointing the other way.
+    assert s.pe_ttm == pytest.approx(22.2662)
+    assert s.price_to_book == pytest.approx(1.9381)
+    assert s.debt_to_equity == pytest.approx(0.4292)
 
 
 def test_a_missing_value_is_none_and_is_listed_in_missing_not_zero():
@@ -494,6 +542,113 @@ def test_a_network_failure_names_the_offline_fallback():
     assert "ConnectionError" in msg
 
 
+def test_the_scan_is_scoped_to_the_requested_symbols():
+    """The default scan page silently drops symbols outside its 150 rows.
+
+    Every Indian name is listed on NSE and BSE, so 150 rows is ~75 companies. TMPV
+    (renamed from TATAMOTORS on 2025-10-24) sits 243rd of 7,393 in the full Indian
+    universe and was absent from that page - reported as missing, indistinguishable
+    from a symbol that failed a filter. Filtering on ``name`` makes coverage exact:
+    the live request for these 12 returns rows for exactly those 12.
+
+    A filter, not a ticker list on ``screener.symbols``: the filter is the public
+    API, needs no exchange prefix, and therefore also scopes the US config, whose
+    symbols carry no suffix to map.
+    """
+    class _Rec(_Working):
+        rows = {"name": ["RELIANCE", "TMPV"],
+                "market_capitalization": [1.8302759082031e13, 9.53908634766e11]}
+
+    _FailingScreener.filters = []
+    snaps = fetch_fundamentals(["RELIANCE.NS", "TMPV.NS"], market="indian_equities",
+                               tvscreener_module=_Rec())
+
+    assert _FailingScreener.filters == [("name", "in_range", ["RELIANCE", "TMPV"])]
+    assert set(snaps) == {"RELIANCE.NS", "TMPV.NS"}
+    assert snaps["TMPV.NS"].market_cap == pytest.approx(9.53908634766e11)
+
+
+def test_a_ticker_the_scanner_drops_is_reported_missing_not_widened_into_a_second_scan():
+    """An unknown ticker does not fail the request, so there is nothing to retry.
+
+    Verified against scanner.tradingview.com: ``["NSE:RELIANCE",
+    "NSE:NOSUCHTICKERZZZ"]`` answers 200 with one row, and an all-unknown list
+    answers 200 with zero rows. The earlier version of this code caught an exception
+    and re-ran the scan *without* the filter, which is the exact bug the filter
+    exists to fix: it would have replaced one missing symbol with a 150-row page
+    that looks like full coverage. The symbol stays absent instead, and the daily
+    briefing reports it as no data.
+    """
+    class _Drops(_Working):
+        rows = {"name": ["RELIANCE"],
+                "market_capitalization": [1.8302759082031e13]}
+
+    _FailingScreener.filters = []
+    snaps = fetch_fundamentals(["RELIANCE.NS", "NOSUCHTICKER.NS"],
+                               market="indian_equities",
+                               tvscreener_module=_Drops())
+    assert len(_FailingScreener.filters) == 1, "must not re-scan without the filter"
+    assert set(snaps) == {"RELIANCE.NS"}
+
+
+def test_names_are_the_bare_ticker_and_an_unrecognised_suffix_sends_no_filter():
+    """No mapping, no filter - a guess would match nothing and read as no data."""
+    assert _tv_names(["RELIANCE.NS", "VOD.L"]) == ["RELIANCE", "VOD"]
+    # the US config's symbols carry no suffix at all, which is why a name filter
+    # covers it where an exchange-qualified ticker list could not
+    assert _tv_names(["AAPL", "NSE:RELIANCE"]) == ["AAPL", "RELIANCE"]
+    assert _tv_names(["AAPL", "BRK.B"]) is None
+
+
+def test_the_request_asks_for_the_markets_own_currency():
+    """The global scanner reports fundamentals in USD; the market does not.
+
+    RELIANCE, same moment, 2026-11-24: scanner.tradingview.com returns
+    ``market_cap_basic`` 1.8302759082031e13, while ``StockScreener()`` without a
+    currency returns 1.9688e11 and still labels the row "INR". That is USD at
+    ~93/USD, and the INR ``min_market_cap`` gate in the market yaml would reject
+    every Indian name by that factor. ``set_currency("inr")`` makes tvscreener
+    return 18302759082031 - identical to the raw endpoint - which is what this
+    pins, at the layer that has the information. The parser cannot fix it: by the
+    time the frame exists, the number is a plain float with no currency attached.
+    """
+    class _Rec(_Working):
+        rows = {"name": ["RELIANCE"],
+                "market_capitalization": [1.8302759082031e13],
+                "return_on_equity_ttm": [9.0147]}
+
+    _FailingScreener.currencies = []
+    snaps = fetch_fundamentals(["RELIANCE.NS"], market="indian_equities",
+                               tvscreener_module=_Rec())
+
+    assert _FailingScreener.currencies == ["inr"]
+    s = snaps["RELIANCE.NS"]
+    assert s.market_cap == pytest.approx(1.8302759082031e13)
+    # and the percentage conversion still applies to the same row
+    assert s.roe == pytest.approx(0.090147)
+
+    assert MARKET_CURRENCY["us_equities"] == "usd"
+    assert MARKET_CURRENCY["uk_equities"] == "gbp"
+
+
+def test_a_market_cap_pinned_from_the_live_indian_endpoint_parses_exactly():
+    """A realistic Indian market cap, end to end through the parser.
+
+    The fixture values elsewhere are round numbers (1.2e13); this is the actual
+    RELIANCE figure in rupees, so a scale error of 100x or an FX mix-up would
+    fail here rather than in a table nobody checks. 1.83e13 INR is ~USD 200bn and
+    passes the 5.0e10 INR floor; 1.97e11 (the USD figure) passes it too, which is
+    exactly why the gate alone never caught this.
+    """
+    df = _frame({"Name": ["RELIANCE"],
+                 "Market Capitalization": [1.8302759082031e13]})
+    resolved = {"name": _F("name", "Name"),
+                "market_cap": _F("market_cap_basic", "Market Capitalization")}
+    snap = build_snapshots(df, resolved)["RELIANCE"]
+    assert snap.market_cap == pytest.approx(1.8302759082031e13)
+    assert snap.currency is None or snap.currency != "USD"  # no relabelling
+
+
 def test_a_working_request_produces_snapshots_end_to_end():
     """The happy path through fetch_fundamentals, with the network stubbed."""
     class _Ok(_Working):
@@ -507,7 +662,8 @@ def test_a_working_request_produces_snapshots_end_to_end():
         rows = {"name": ["AAPL", "MSFT"],
                 "market_capitalization": [3.0e12, 2.8e12],
                 "price_to_earnings_ratio_ttm": [28.0, 33.0],
-                "return_on_equity_ttm": [0.55, 0.38],
+                # 55% and 38%, the scanner's own units - see _PERCENT_FIELDS.
+                "return_on_equity_ttm": [55.0, 38.0],
                 "upcoming_earnings_date": ["2026-04-30", "2026-04-25"]}
 
     snaps = fetch_fundamentals(["AAPL"], market="us_equities", tvscreener_module=_Ok())
@@ -539,6 +695,12 @@ class _EnumLike:
         raise AttributeError(item)
 
 
+class _Ops:
+    """Stand-in for ``tvscreener.FilterOperator``: only membership is needed."""
+
+    IN_RANGE = "in_range"
+
+
 class _FullEnum:
     """An enum that CAN resolve every canonical field, so tests of the request
     path actually reach the request. Without this, ``_resolve_fields`` fails first
@@ -558,6 +720,7 @@ class _Working:
 
     StockField = _FullEnum()
     Market = _FullEnum()
+    FilterOperator = _Ops()
 
     rows = None
     exc = None
@@ -570,16 +733,32 @@ class _FailingScreener:
     def __init__(self, exc=None, rows=None):
         self._exc, self._rows = exc, rows
 
+    #: Every set_currency() argument seen, so a test can assert the request asked
+    #: for the market's currency rather than the scanner's USD default.
+    currencies: list = []
+    #: Every where() call as (field name, operation, values), so a test can assert
+    #: the scan is scoped to the asked-for names rather than the default 150-row page.
+    filters: list = []
+
     def set_markets(self, *a, **k):
         return self
 
-    def select(self, *a, **k):
+    def set_currency(self, currency):
+        _FailingScreener.currencies.append(currency)
+        return self
+
+    def where(self, field, operation, values):
+        _FailingScreener.filters.append(
+            (getattr(field, "field_name", field), operation, list(values)))
         return self
 
     def get(self, *a, **k):
         if self._exc:
             raise self._exc
         return pd.DataFrame(self._rows if self._rows is not None else [])
+
+    def select(self, *a, **k):
+        return self
 
 
 # _resolve_fields needs a real hasattr-able enum, so give _EnumLike members for

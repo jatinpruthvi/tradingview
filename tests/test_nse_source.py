@@ -380,10 +380,16 @@ def test_http_is_sequential_and_delays_between_requests():
 
 def test_http_reports_an_unreachable_host_clearly():
     """A network failure must name the host and say it has to be reachable from
-    where tvlab runs - not surface as an empty result."""
+    where tvlab runs - not surface as an empty result.
+
+    Targets a closed loopback port rather than a real endpoint. The original
+    version pointed at Yahoo's chart API and only passed because this machine
+    had no route to it: as soon as the data route worked, the test failed on a
+    200. A test of offline behaviour must not require the internet to be down.
+    """
     from tvlab.data.nse import _default_fetcher
-    with pytest.raises(DataError, match="could not reach|HTTP"):
-        _default_fetcher("https://query1.finance.yahoo.com/v8/finance/chart/AAPL?interval=1d&range=1d", 5)
+    with pytest.raises(DataError, match="could not reach 127.0.0.1:9"):
+        _default_fetcher("http://127.0.0.1:9/v8/finance/chart/AAPL?interval=1d&range=1d", 5)
 
 
 def test_note_rate_limit_backs_off():

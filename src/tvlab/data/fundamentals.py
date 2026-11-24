@@ -20,11 +20,10 @@ calendars. See ``VENDOR.md`` section 4.
 
 Honest status
 -------------
-**This has never been executed against the live endpoint.** The sandbox this was
-written in has no route to ``scanner.tradingview.com``, so the request path is
-built defensively and the parsing is tested against fixtures, not captures - the
-same caveat ``data/nse.py`` carries. Two consequences are designed in rather than
-hoped away:
+The parsing is tested against fixtures, and the request path was verified against
+``scanner.tradingview.com`` by hand (see the notes on currency and on scoping the
+scan below) rather than captured in CI, which has no route to it - the same caveat
+``data/nse.py`` carries. Two consequences are designed in rather than hoped away:
 
 * Column identity is resolved by *label and by field name*, normalised, because
   ``tvscreener`` builds its request as ``{field_name: label}`` and different
@@ -105,6 +104,19 @@ FIELD_CANDIDATES: Dict[str, Tuple[str, ...]] = {
 #: Fields that must be dates rather than numbers.
 _DATE_FIELDS = {"next_earnings", "last_earnings"}
 
+#: Fields the scanner reports as a *percentage* rather than a fraction.
+#: ``RETURN_ON_EQUITY_TTM`` is 9.0147 for RELIANCE, i.e. 9.01% - not 901%.
+#: Everything downstream (the gates, ``min_roe: 0.15`` in the market yaml, the
+#: ``roe * 100`` in the briefing table) treats these as fractions, so the divide
+#: happens here, once, at the boundary. Without it a 9% ROE clears a 15% gate
+#: and prints as 901.5%: both the screen and the risk control silently invert.
+#: Measured against scanner.tradingview.com on 2026-11-24. Ratios that happen
+#: to be small - P/E, P/B, debt/equity, current ratio - are NOT in this set.
+_PERCENT_FIELDS = frozenset({
+    "roe", "roa", "roic", "gross_margin", "operating_margin", "net_margin",
+    "revenue_growth_yoy", "eps_growth_yoy", "dividend_yield", "dividend_payout",
+})
+
 #: tvlab market name -> tvscreener ``Market`` enum member name.
 MARKET_MAP: Dict[str, str] = {
     "us_equities": "AMERICA",
@@ -112,6 +124,21 @@ MARKET_MAP: Dict[str, str] = {
     "uk_equities": "UK",
     "crypto": "ALL",
     "forex": "ALL",
+}
+
+#: Currency each market's fundamentals must be reported in. The global scanner
+#: (``StockScreener()`` with no market) returns fundamentals in USD whatever the
+#: listing currency is, and the frame's ``currency`` column still shows the
+#: *listing* currency - so the mismatch is invisible. RELIANCE came back as
+#: 1.97e11 labelled "INR" while scanner.tradingview.com returns 1.83e13 for the
+#: same moment: dollars against rupees at ~93/USD. The caps in
+#: ``config/markets/*_equities.yaml`` are stated in the local currency ("INR,
+#: not USD: 5.0e10 is ~USD 6bn"), so without the conversion a 6bn-rupee floor is
+#: applied to a dollar figure and every Indian name fails it by ~93x.
+MARKET_CURRENCY: Dict[str, str] = {
+    "us_equities": "usd",
+    "indian_equities": "inr",
+    "uk_equities": "gbp",
 }
 
 #: Markets where fundamentals are meaningful at all. Crypto and forex have no
@@ -335,6 +362,31 @@ def _to_date(v: Any) -> Optional[pd.Timestamp]:
         return None
 
 
+#: Quote suffixes this repo's market files use. They are stripped, not translated to
+#: an exchange: the scanner filters on ``name``, which is the bare ticker.
+_TICKER_SUFFIXES = frozenset({"NS", "BO", "L"})
+
+
+def _tv_names(symbols: Sequence[str]) -> Optional[List[str]]:
+    """Configured symbols -> the scanner's own ``name`` values, or ``None`` if unsure.
+
+    ``RELIANCE.NS``, ``RELIANCE.BO`` and ``NSE:RELIANCE`` are all ``RELIANCE`` to
+    TradingView. Only the suffixes this repo's market files actually use are
+    stripped; an unrecognised one returns ``None`` so the caller filters on nothing
+    rather than on a guess - and a name filter that matches nothing would read as a
+    market with no fundamentals.
+    """
+    out: List[str] = []
+    for symbol in symbols:
+        base, dot, suffix = str(symbol).rpartition(".")
+        if dot:
+            if suffix.upper() not in _TICKER_SUFFIXES:
+                return None
+            symbol = base
+        out.append(str(symbol).split(":")[-1].upper())
+    return out or None
+
+
 def fetch_fundamentals(
     symbols: Optional[Sequence[str]] = None,
     market: str = "us_equities",
@@ -387,16 +439,51 @@ def fetch_fundamentals(
         except Exception as exc:
             log.warning("set_markets(%s) failed: %s", enum_name, exc)
 
+    # Ask for the market's own currency before the single request goes out. The
+    # parser is not the problem here - it reads whatever number the frame holds -
+    # so fixing this in ``build_snapshots`` would mean guessing an FX rate.
+    ccy = MARKET_CURRENCY.get(market)
+    set_currency = getattr(screener, "set_currency", None)
+    if ccy and callable(set_currency):
+        try:
+            set_currency(ccy)
+        except Exception as exc:  # noqa: BLE001 - a cosmetic setting, not the data
+            log.warning("set_currency(%r) failed: %s; market cap is in the "
+                        "scanner's default currency (USD)", ccy, exc)
+    elif ccy:
+        log.warning("this tvscreener build has no set_currency(); %s market cap "
+                    "arrives in USD and min_market_cap must be read as USD", market)
+
+    # Scope the scan to the asked-for names. Without this every request returns the
+    # default 150-row page, which holds only ~75 Indian companies (each is listed on
+    # both NSE and BSE), and a symbol outside that page is absent from the result
+    # while looking exactly like a symbol that failed a filter. TMPV - renamed from
+    # TATAMOTORS on 2025-10-24 and 243rd of 7,393 Indian tickers - was not in it.
+    #
+    # This is a ``where()`` filter rather than a ticker list assigned to
+    # ``screener.symbols``: filtering happens inside the scanner, needs no exchange
+    # prefix (so the suffix-less US config is scoped too), and goes through the
+    # documented API instead of an attribute that only exists to hold the request
+    # body. A name that matches nothing simply does not come back - the caller
+    # reports it as no data, which is the truth.
+    names = _tv_names(symbols) if symbols else None
+
+    request_failed = (
+        "  This needs outbound access to scanner.tradingview.com.\n"
+        "  Offline fallback: run with --data-source csv|synthetic and leave\n"
+        "  fundamentals.enabled false - the technical ranking still works,\n"
+        "  it just cannot tell you whether the company is worth owning."
+    )
+
     try:
         screener.select(*resolved.values())
+        if names:
+            screener.where(tvs.StockField.NAME, tvs.FilterOperator.IN_RANGE, names)
         df = screener.get()
     except Exception as exc:
         raise DataError(
             f"TradingView fundamentals request failed: {type(exc).__name__}: {exc}\n"
-            "  This needs outbound access to scanner.tradingview.com.\n"
-            "  Offline fallback: run with --data-source csv|synthetic and leave\n"
-            "  fundamentals.enabled false - the technical ranking still works,\n"
-            "  it just cannot tell you whether the company is worth owning."
+            + request_failed
         ) from exc
 
     if df is None or len(df) == 0:
@@ -464,6 +551,8 @@ def build_snapshots(
                 parsed = None if v is None else str(v)
             else:
                 parsed = _to_float(v)
+                if parsed is not None and canonical in _PERCENT_FIELDS:
+                    parsed /= 100.0
             if parsed is None:
                 missing.append(canonical)
             else:

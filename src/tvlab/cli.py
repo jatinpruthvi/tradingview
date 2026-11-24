@@ -199,7 +199,7 @@ def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional
         if not path.exists():
             continue
         try:
-            d = json.loads(path.read_text())
+            d = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001 - a corrupt report must not kill the scan
             return {"status": "corrupt", "win_rate": None, "n_trades": 0, "path": str(path),
                     "error": f"{type(exc).__name__}: {exc}"}
