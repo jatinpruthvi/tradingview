@@ -455,6 +455,250 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
                   f"of equity notional, capped at {cfg.risk.max_position_pct * 100:.0f}%.[/dim]")
 
 
+# ----------------------------------------------------------------------- daily
+@cli.command()
+@click.option("--market", default=None)
+@click.option("--style", default=None)
+@click.option("--config", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
+@click.option("--symbols", default=None)
+@click.option("--data-source", default=None,
+              help="synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart")
+@click.option("--timeframe", default=None)
+@click.option("--top", type=int, default=10, help="how many ideas to show")
+@click.option("--max-breakeven", type=float, default=0.60, show_default=True,
+              help="reject ideas needing a higher win rate than this to break even")
+@click.option("--no-fundamentals", is_flag=True, default=False,
+              help="skip the fundamental gates (equity markets only)")
+@click.option("--no-journal", is_flag=True, default=False,
+              help="do not append this run to output/daily/journal.jsonl")
+@click.option("--trendlines", is_flag=True, default=False,
+              help="also fit diagonal support/resistance (~27 ms per symbol)")
+def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top,
+          max_breakeven, no_fundamentals, no_journal, trendlines) -> None:
+    """The daily run: what to look at today, and why not to trust it.
+
+    This is the command to schedule. It composes three things that already exist
+    and adds a record:
+
+    1. **Scan** - is there a setup on the last bar of any symbol?
+    2. **Rank** - of those, which can actually be taken at your configured fees and
+       slippage? Ranked by cost-adjusted expectancy, never by reward:risk, because
+       R:R can be inflated by shrinking the stop into the noise.
+    3. **Gate on fundamentals** - is this a company worth owning while the setup
+       plays out, and does it report earnings before the stop would matter?
+
+    Then it appends one line to ``output/daily/journal.jsonl``. That is the point of
+    running it daily rather than once: a recommendation you cannot look back at is
+    unfalsifiable, so nothing is ever checked and nothing is ever learned. In a
+    month you can score the shortlists against what actually happened.
+
+    \b
+    What this is NOT
+    ----------------
+    Not advice, and not a claim that these names will go up. The strategy behind
+    this ranking is NOT VALIDATED on its default configuration - it was not
+    distinguishable from random entry in the study that produced that verdict - and
+    that fact is printed above every shortlist rather than buried below it. The
+    fundamental thresholds are risk controls that have never been backtested; they
+    veto, they do not score.
+
+    \b
+    Exit codes
+    ----------
+    0  a shortlist was produced, or the market was observed and nothing qualified
+    2  every symbol failed to load - a data failure, not a market verdict
+
+    The distinction matters because the two have opposite remedies. "Nothing
+    qualifies today" means wait; "we could not look" means fix the data route. An
+    outage rendered as a quiet market sends you away believing a trading signal
+    that never existed.
+    """
+    from .data.fundamentals import FUNDAMENTAL_MARKETS, fetch_fundamentals
+    from .data.store import DataStore
+    from .pipeline import build_strategy
+    from .screener import SCAN_BARS, scan_universe
+    from .screener.daily import append_journal, build_briefing
+
+    cfg = _cfg(market, style, config, set_pairs, data_source)
+    tf = timeframe or cfg.timeframe.execution
+    syms = _symbols_arg(cfg, symbols)
+    mkt = cfg.universe.market
+
+    store = DataStore(cfg)
+    strat = build_strategy(cfg)
+    rows, errors = scan_universe(store, cfg, syms, strat=strat, timeframe=tf,
+                                 bars=SCAN_BARS, with_trendlines=trendlines)
+
+    # ---- fundamentals: guarded, because this is the only step that needs a route
+    # to TradingView, and its absence must be visible rather than silent.
+    snaps: Optional[Dict[str, Any]] = None
+    fund_error: Optional[str] = None
+    want_fundamentals = (cfg.fundamentals.enabled and not no_fundamentals
+                         and mkt in FUNDAMENTAL_MARKETS)
+    if cfg.fundamentals.enabled and mkt not in FUNDAMENTAL_MARKETS:
+        fund_error = (f"market '{mkt}' has no earnings, book value or analyst "
+                      f"coverage, so there is nothing to gate on")
+    elif want_fundamentals and rows:
+        try:
+            snaps = fetch_fundamentals([r.symbol for r in rows], market=mkt,
+                                       max_symbols=max(len(rows), 200),
+                                       extra_fields=cfg.fundamentals.extra_fields)
+        except Exception as exc:  # noqa: BLE001 - any failure is a coverage fact
+            fund_error = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+    b = build_briefing(rows, errors, cfg, snaps=snaps,
+                       study=_measured_win_rate(cfg, strat.name),
+                       max_breakeven=max_breakeven, top=top,
+                       fundamentals_error=fund_error)
+
+    console.print(f"\n[bold]Daily briefing[/bold] - {b.as_of}  "
+                  f"[dim]{mkt} / {b.style} / {b.strategy} / {tf}[/dim]")
+
+    # The advisory precedes the shortlist, always. Ranking candidates without
+    # carrying the validation verdict forward would launder an unvalidated
+    # strategy into something that reads as advice.
+    colour = "green" if b.is_validated else ("red" if b.study_verdict else "yellow")
+    console.print(f"  [{colour}]{b.advisory_line}[/{colour}]")
+
+    console.print(f"  scanned {b.symbols_scanned} symbol(s)  ·  {b.signals_found} live "
+                  f"signal(s)  ·  {len(b.rows)} on the shortlist  ·  "
+                  f"{len(b.rejected_technical)} rejected on cost  ·  "
+                  f"{len(b.rejected_fundamental)} rejected or unrated on fundamentals")
+    if b.data_errors:
+        console.print(f"  [yellow]{len(b.data_errors)} symbol(s) failed to load - the "
+                      f"shortlist covers the rest[/yellow]")
+
+    # ---- fundamental coverage, stated whether it ran or not
+    if want_fundamentals and snaps is not None:
+        cov = b.fundamental_coverage or {}
+        mf = cov.get("missing_fields") or {}
+        console.print(f"  fundamentals: {cov.get('symbols', 0)} symbol(s) returned, "
+                      f"{cov.get('complete', 0)} complete, {cov.get('partial', 0)} partial")
+        if mf:
+            worst = ", ".join(f"{k} ({v})" for k, v in list(mf.items())[:4])
+            console.print(f"  [dim]fields the endpoint did not report: {worst}"
+                          f"{' …' if len(mf) > 4 else ''}[/dim]")
+    elif fund_error:
+        console.print(f"  [yellow]fundamentals NOT applied: {fund_error}[/yellow]")
+        if b.rows:
+            console.print("  [yellow]every name below is therefore NOT fundamentally "
+                          "screened - including for an earnings release.[/yellow]")
+
+    # ---- the three-way outcome
+    if b.outcome == "data_failure":
+        console.print("\n[bold red]Nothing was scanned - this is a data failure, not a "
+                      "market verdict.[/bold red]")
+        for sym, err in list(b.data_errors.items())[:5]:
+            console.print(f"    [red]{sym:<14}[/red] [dim]{err}[/dim]")
+        if len(b.data_errors) > 5:
+            console.print(f"    [dim]... and {len(b.data_errors) - 5} more[/dim]")
+        src_flag = f"--data-source {data_source} " if data_source else ""
+        console.print("\n  [yellow]No briefing is possible until bars load. Check the data "
+                      "route, then retry:[/yellow]")
+        console.print(f"    [dim]tvlab data --market {mkt} --style {b.style} "
+                      f"{src_flag}--limit 50[/dim]")
+        raise SystemExit(2)
+
+    if not b.rows:
+        console.print("\n[bold yellow]Nothing qualifies today.[/bold yellow]")
+        console.print(f"  {b.outcome_detail}")
+        for rej in b.rejected_technical[:top]:
+            console.print(f"    [dim]{rej['symbol']:<12} {rej['side']:<5} R:R {rej['rr']:.2f}"
+                          f"  - {'; '.join(rej['reasons'])}[/dim]")
+        for rej in b.rejected_fundamental[:top]:
+            console.print(f"    [dim]{rej['symbol']:<12} {rej['status']:<8}"
+                          f"  - {rej['detail']}[/dim]")
+        console.print("\n  [dim]This is the normal state. A setup requiring bias + sweep +"
+                      " confirmation should not fire often, and an idea whose stop is so"
+                      " tight that costs eat the reward is untradeable, not merely worse."
+                      " Come back tomorrow - that is what the journal is for.[/dim]")
+        if not no_journal:
+            jp = append_journal(b, REPO_ROOT / cfg.output.dir)
+            console.print(f"  [dim]journaled: {jp}[/dim]")
+        return
+
+    # ---- the shortlist
+    t = Table(title=f"{b.as_of} shortlist - ranked by quality after costs")
+    for col, just in (("#", "right"), ("symbol", "left"), ("side", "left"), ("R:R", "right"),
+                      ("stop %", "right"), ("cost R", "right"), ("breakeven", "right"),
+                      ("score", "right"), ("sector", "left"), ("mkt cap", "right"),
+                      ("P/E", "right"), ("ROE", "right"), ("earnings", "right"),
+                      ("fundamentals", "left")):
+        t.add_column(col, justify=just)
+
+    for i, r in enumerate(b.rows, 1):
+        be = r.breakeven_win_rate
+        be_colour = "green" if be < 0.30 else ("yellow" if be < 0.45 else "red")
+        fstat = r.fundamental_status or ("not screened" if fund_error else "-")
+        fcolour = {"approved": "green", "unrated": "yellow"}.get(fstat, "dim")
+        d2e = "-" if r.days_to_earnings is None else f"{r.days_to_earnings}d"
+        if r.days_to_earnings is not None and r.days_to_earnings <= 14:
+            d2e = f"[yellow]{d2e}[/yellow]"
+        t.add_row(
+            str(i), r.symbol, r.side, f"{r.rr:.2f}", f"{r.risk_pct * 100:.2f}",
+            f"{r.cost_in_r:.2f}" if np.isfinite(r.cost_in_r) else "inf",
+            f"[{be_colour}]{be * 100:.1f}%[/]", f"{r.quality_score:.3f}",
+            (r.sector or "-")[:14],
+            _mcap(r.market_cap, r.symbol),
+            "-" if r.pe_ttm is None else f"{r.pe_ttm:.1f}",
+            "-" if r.roe is None else f"{r.roe * 100:.1f}%",
+            d2e, f"[{fcolour}]{fstat}[/]",
+        )
+    console.print(t)
+
+    best = b.rows[0]
+    console.print(f"\n[bold]Top of the list: {best.symbol} {best.side}[/bold]  "
+                  f"entry ~{best.last:,.4g}  stop {best.stop:,.4g} "
+                  f"({best.risk_pct * 100:.2f}%)"
+                  + (f"  target {best.target:,.4g}" if best.target else ""))
+    for r_ in best.reasons:
+        console.print(f"  [green]+[/green] {r_}")
+    for w in best.warnings:
+        console.print(f"  [yellow]![/yellow] {w}")
+    if best.fundamental_detail:
+        console.print(f"  [dim]fundamentals: {best.fundamental_detail}[/dim]")
+    console.print(f"  [dim]position size if taken: risk_per_trade "
+                  f"{cfg.risk.risk_per_trade * 100:.2f}% of equity / stop "
+                  f"{best.risk_pct * 100:.2f}% = "
+                  f"{cfg.risk.risk_per_trade / best.risk_pct * 100:.1f}% of equity notional, "
+                  f"capped at {cfg.risk.max_position_pct * 100:.0f}%.[/dim]")
+
+    if b.rejected_fundamental:
+        console.print(f"\n[dim]Screened out on fundamentals "
+                      f"({len(b.rejected_fundamental)}):[/dim]")
+        for rej in b.rejected_fundamental[:top]:
+            console.print(f"  [dim]{rej['symbol']:<14} {rej['status']:<8} - "
+                          f"{rej['detail']}[/dim]")
+    if b.rejected_technical:
+        console.print(f"\n[dim]Rejected on cost ({len(b.rejected_technical)}):[/dim]")
+        for rej in b.rejected_technical[:top]:
+            console.print(f"  [dim]{rej['symbol']:<14} {rej['side']:<5} R:R "
+                          f"{rej['rr']:.2f}  breakeven "
+                          f"{rej['breakeven_win_rate'] * 100:.0f}%  - "
+                          f"{'; '.join(rej['reasons'])}[/dim]")
+
+    if not no_journal:
+        jp = append_journal(b, REPO_ROOT / cfg.output.dir)
+        console.print(f"\n[dim]journaled: {jp}  (score these against what happens - a "
+                      f"recommendation you cannot look back at is unfalsifiable)[/dim]")
+
+
+def _mcap(v: Optional[float], symbol: str) -> str:
+    """Market cap in the listing currency, abbreviated.
+
+    A bare number here is unreadable (5000000000000) and a USD-normalised one would
+    be a claim about an exchange rate this function has not seen, so it is scaled
+    and left in the currency the scanner reported.
+    """
+    if v is None or not np.isfinite(v):
+        return "-"
+    for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(v) >= div:
+            return f"{v / div:,.1f}{suf}"
+    return f"{v:,.0f}"
+
+
 # ------------------------------------------------------------------------ scan
 @cli.command()
 @click.option("--market", default=None)

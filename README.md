@@ -108,13 +108,17 @@ the tool.
 . .venv/bin/activate
 
 tvlab markets                         # what is configured
+tvlab daily    --market us_equities --style swing     # today's shortlist, journaled
 tvlab suggest  --market crypto --style swing          # the best idea, after costs
 tvlab scan     --market crypto --style swing          # who is in a setup right now
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 385 tests
+pytest                                                # 625 tests
 ```
+
+`tvlab daily` is the one to schedule. It composes the other three stages and writes
+a record - see [The daily run](#the-daily-run).
 
 ### `tvlab suggest` ranks by expectancy after costs, not by R:R
 
@@ -196,6 +200,110 @@ tvlab study --market forex --style intraday \
             --set walk_forward.n_splits=6 \
             --allocation inverse_vol
 ```
+
+---
+
+## The daily run
+
+`tvlab daily` is the command to schedule every morning. It composes three stages
+that already existed and adds a record:
+
+```
+scan (is there a setup?)  ->  rank (can it be taken at these costs?)  ->  gate (is it worth owning?)
+screener/scanner.py            screener/quality.py                        screener/fundamental.py
+                                          |
+                                          v
+                                   output/daily/journal.jsonl
+```
+
+```bash
+tvlab daily --market us_equities --style swing            # today's shortlist
+tvlab daily --market indian_equities --style swing        # NSE large caps
+tvlab daily --market us_equities --no-fundamentals        # technical only, no network needed
+tvlab daily --market us_equities --set fundamentals.max_pe_ttm=25 --set fundamentals.min_roe=0.15
+```
+
+### Fundamentals: gates, not weights
+
+For equities the technical half answers *"is there a setup right now?"* and cannot
+answer *"is this a company worth owning while the setup plays out?"* The second
+question is not optional: a textbook liquidity sweep into a name reporting earnings
+tomorrow is a coin flip on a gap, not a trade.
+
+`fundamentals:` in `config/markets/{us,indian}_equities.yaml` configures the gates.
+Three design decisions matter:
+
+**Nothing here is weighted into a score.** `quality.py` ranks on cost-adjusted
+expectancy because that is arithmetic — a breakeven win rate follows from the fee
+schedule and the stop distance and needs no forecast. A weighted blend of P/E, ROE
+and growth has no such derivation, so any weights would be invented, and fitting
+them on the ~31 trades this repo can measure is noise mining. Fundamentals **veto**;
+the ranking of whatever survives stays with the part of the system that can justify
+itself. Approved names are listed alphabetically, because every one of them passed
+every configured gate and there is nothing honest to order them by.
+
+**Missing data is a third outcome.** A symbol whose P/E did not arrive is neither
+approved nor rejected — it is `unrated`, with the missing field named. Passing it
+would let an unfiltered name into the shortlist; rejecting it would turn an endpoint
+gap into a market verdict.
+
+**The earnings blackout is the gate that earns its place.** A swing position held
+through an earnings release is an unhedgeable gap: the stop does not protect against
+it, because the position opens at the new price. It needs nothing but a date and
+makes no statistical claim. When the date is unknown the symbol is unrated, not waved
+through — "we do not know when they report" is not a pass.
+
+What is switched on by default is risk control, not alpha: the earnings blackout, a
+market-cap floor, positive free cash flow, a debt/equity ceiling and a current-ratio
+floor. The valuation thresholds (`max_pe_ttm`, `min_roe`, `min_analyst_rating`, …)
+ship as `null` **on purpose** — the honest position is that this repo has no evidence
+for a number there, and a threshold would look rigorous while being arbitrary. Set
+one with `--set` if you have a view you can defend.
+
+> **These thresholds have never been backtested.** No claim is made that any of them
+> improves expectancy. They are what a conservative mandate implies, nothing more.
+
+### The journal is the point
+
+A daily recommendation you cannot look back at is unfalsifiable: in a month nobody
+remembers what was suggested, so nothing is ever checked. Every run appends one JSON
+line to `output/daily/journal.jsonl` and writes the day's full briefing to
+`output/daily/<date>.json`. Re-running the same day appends to the journal and
+overwrites the dated file, so a second attempt is not mistaken for a second morning.
+
+Each line records the study verdict that was in force, so a past shortlist can be
+judged by what was known when it was made. `--no-journal` turns it off; the dashboard
+only writes with `?journal=true`, because a GET that writes is a surprise and a
+polling browser would fill the file with duplicates.
+
+### What it refuses to do
+
+The advisory line is printed **above** the shortlist, in the terminal, in the JSON
+payload and in the dashboard panel:
+
+```
+Daily briefing - 2026-11-24  us_equities / swing / smc_trend / 4h
+  The strategy behind this shortlist is NOT VALIDATED (3/8 checks) - it was not
+  distinguishable from random entry in the study that produced this verdict.
+  Treat the list as a screen, not as advice.
+```
+
+`tvlab daily` is a screen with arithmetic attached. It is not a stock tip, and it
+will not name "the best stock to buy today" — the strategy behind the ranking has
+not been shown to beat random entry on the evidence available here. If that changes,
+the verdict in the study report changes and this framing changes with it: the labels
+are read from `report.py`, not hardcoded.
+
+Exit codes follow the contract the rest of the CLI uses: `0` when a shortlist was
+produced or the market was observed and nothing qualified, `2` when **every** symbol
+failed to load. Those have opposite remedies — "nothing qualifies today" means wait,
+"we could not look" means fix the data route — so an outage is never allowed to
+render as a quiet market.
+
+Fundamentals need outbound access to `scanner.tradingview.com`. Offline, the run
+still completes, every surviving name is flagged `NOT fundamentally screened`, and
+the reason is recorded in the briefing's `notes`. The dashboard shows the same
+warning in red.
 
 ---
 
@@ -315,7 +423,7 @@ universe scanner  ->  signal engine  ->  backtester  ->  validation stack  ->  r
 
 | Stage | Module | Notes |
 |:------|:-------|:------|
-| Data | `data/` | synthetic, CSV/Parquet, ccxt, yfinance, TradingView scanner. Cached, validated, resampled. |
+| Data | `data/` | synthetic, CSV/Parquet, ccxt, yfinance, NSE, TradingView scanner (universe **and** fundamentals). Cached, validated, resampled. |
 | Indicators | `indicators/` | technical + **lag-safe** smart-money concepts, cross-checked against the vendored reference |
 | Risk | `risk/sizing.py` | risk-per-trade sizing, position caps, drawdown throttle and halt |
 | Strategies | `strategy/` | registry + 4 setups: `smc_trend`, `ema_pullback`, `donchian_breakout`, `buy_and_hold` |
@@ -324,6 +432,8 @@ universe scanner  ->  signal engine  ->  backtester  ->  validation stack  ->  r
 | Validation | `validation/` | lookahead audit, permutation nulls, pattern recovery |
 | Portfolio | `portfolio/` | correlation-aware allocation under the risk mandate |
 | Screener | `screener/` | one implementation, shared by CLI and dashboard |
+| Fundamentals | `data/fundamentals.py`, `screener/fundamental.py` | valuation / quality / balance-sheet / dividend / analyst gates + the earnings blackout. **Gates, never weights** — see [The daily run](#the-daily-run) |
+| Daily | `screener/daily.py` | composes scan + rank + gates, carries the study verdict, appends a falsifiable journal |
 | Report | `report.py`, `study.py` | verdict, charts, markdown + JSON |
 | Dashboard | `dashboard/` | FastAPI + lightweight-charts v5.3.0 (vendored, no CDN) |
 
@@ -446,6 +556,17 @@ wrong, and each is now a regression test.
 | 14 | Unallocated capital treated as nothing, not cash | report showed **"Net P&L −49,916"** next to **"Total return +0.17%"** for the same run | idle cash added back; curve starts at the account balance |
 | 15 | `fan_chart` quantiles along `axis=1` | bands had one value per simulation, not per bar; plot raised a length error | `axis=0` |
 | 16 | Walk-forward used a fixed 8-trade floor | a selective setup trading ~12 times in 2,500 bars had **every** window discarded — "no usable fit" ×3 | adaptive floor + graceful `expectancy` fallback with a `degraded` flag |
+| 17 | `_regime`/`_realised_vol` assigned **after** `_apply_session` filtered the index | `ValueError: Length of values (4000) does not match length of index (667)` — **every non-crypto market, every intraday timeframe, every bar count**. Indian and US equities were unusable on synthetic data: scan, ohlcv, indicators and backtest all failed | attach ground truth *before* the filter, so it is dropped with the bars it describes |
+| 18 | `_column_lookup` cleaned keys with a `[^A-Z0-9]` class | lowercased labels collapsed to `""`, one key matched every lookup, and **every fundamental silently read the same wrong column** | case-insensitive class; an empty key is never indexed |
+| 19 | `build_briefing` treated "never fetched" as "fetched nothing" | with the gates on, an empty `snaps` silently moved every candidate to `no_data` and the shortlist vanished — reading as a market with no qualifying names | `snaps is None` is handled as an outage: names survive, flagged unscreened |
+| 20 | `_set_outcome` keyed the no-signal branch off the shortlist length | two signals fired and were screened out on fundamentals, and the output said **"no strategy fired on the last bar of any symbol"** — sending the user looking for setups that were there | branch on `signals_found`; add `screened_out` and `unscoreable` outcomes |
+
+Bug 17 was found by reading the running dashboard's log, not by review: it showed
+every `*.NS` symbol failing with the same length error across four different
+endpoints while the crypto study beside it worked. The fix is bit-identical for
+crypto and daily bars — `tests/test_synthetic_session_filter.py` pins close-sum
+fingerprints so a future reordering that shifts the RNG order fails loudly rather
+than quietly invalidating every number quoted above.
 
 Two were metric traps rather than code traps: `trade_stats()["exposure_pct"]` was
 a bar *count* labelled as a percentage, and scoring a trend-following setup's
@@ -464,12 +585,12 @@ src/tvlab/         config, data/, indicators/, risk/, strategy/, backtest/,
                    dashboard/
 dashboard/static/  index.html + vendored lightweight-charts 5.3.0 (Apache-2.0, no CDN)
 scripts/           setup.sh (venv + deps + vendor), fetch-vendor.sh (rebuild vendor/)
-tests/             209 tests, 8 files - including lookahead positive controls
+tests/             625 tests, 26 files - including lookahead positive controls
 vendor/            18 reference repos, gitignored (632 MB); repos.txt + LOCK.json tracked
-output/            generated reports, gitignored
+output/            generated reports + output/daily/ journal, gitignored
 ```
 
-9,877 lines of source, 2,043 lines of tests.
+13,966 lines of source, 7,661 lines of tests.
 
 ---
 
@@ -525,8 +646,22 @@ Stated plainly, because each one changes what the output means.
 - **Single-position-per-symbol.** No pyramiding, no partial exits, no hedging.
 - **Correlation is estimated from realised returns**, not modelled. In a genuine
   risk-off move correlations go to 1 and the groups here would understate it.
-- **The scanner's TradingView path is untested live** for the reason above;
-  `tvscreener`'s API is introspected and guarded with `hasattr`.
+- **The TradingView paths are untested live** for the reason above — both the
+  universe scanner and the fundamentals adapter. `tvscreener`'s API is introspected
+  and guarded with `hasattr`, every field name is resolved through a candidate list
+  rather than hardcoded, and the parsing is tested against fixtures rather than
+  captures. `tests/test_fundamentals.py` asserts that all 29 canonical fields still
+  resolve against the installed enum, so an upstream rename fails loudly in CI
+  instead of quietly producing a table of Nones.
+- **Fundamental thresholds are not backtested.** The gates in
+  `config/markets/*_equities.yaml` are what a conservative mandate implies, not a
+  measured edge. No claim is made that any of them improves expectancy, and they
+  veto rather than score precisely so that no invented weight can enter the ranking.
+- **`tvscreener` also ships capability this repo does not use yet**: financial
+  statement history (~20 fiscal years of income statement, balance sheet, cash flow
+  and statistics), corporate events, monthly seasonality, earnings/dividend/IPO/
+  economic calendars, peers, news, options surfaces and yield curves. See
+  `VENDOR.md` §4 for the inventory and why each was left out.
 - **The `smc_trend` setup is deliberately rare.** On the default 4,000 bars of
   synthetic 4h data it takes 31 trades across a 10-symbol universe, of which the
   risk caps fund 2. Loosening it to generate more trades was tried and **measured

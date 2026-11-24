@@ -177,6 +177,77 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
+class FundamentalsConfig:
+    """Fundamental gates, applied *on top of* the cost-aware technical ranking.
+
+    Off by default. Two of the four markets have no meaningful fundamentals at all
+    - crypto and forex - so this is enabled per market in ``config/markets/*.yaml``
+    rather than globally, and a market that enables it must have a source that can
+    actually serve it.
+
+    Every threshold is ``None`` = not applied. A filter that is not set must not
+    silently become "anything passes" *and* must not become "everything fails"; it
+    is simply not evaluated.
+
+    **Missing data is a third outcome, not a pass.** If a symbol does not report a
+    field that an *active* filter needs, it is neither approved nor rejected - it
+    goes to an ``unrated`` bucket with the missing field named. Silently passing it
+    would let an unfiltered name into a ranked shortlist; silently rejecting it
+    would turn an endpoint gap into a market verdict, which is the same mistake the
+    data-failure handling elsewhere in this repo exists to prevent.
+    """
+
+    enabled: bool = False
+
+    # --- scale and liquidity -------------------------------------------------
+    min_market_cap: Optional[float] = None
+
+    # --- valuation -----------------------------------------------------------
+    max_pe_ttm: Optional[float] = None
+    max_price_to_book: Optional[float] = None
+    max_price_to_sales: Optional[float] = None
+    max_ev_to_ebitda: Optional[float] = None
+
+    # --- quality -------------------------------------------------------------
+    min_roe: Optional[float] = None
+    min_operating_margin: Optional[float] = None
+    min_net_margin: Optional[float] = None
+    min_revenue_growth_yoy: Optional[float] = None
+    min_eps_growth_yoy: Optional[float] = None
+
+    # --- balance sheet -------------------------------------------------------
+    max_debt_to_equity: Optional[float] = None
+    min_current_ratio: Optional[float] = None
+    require_positive_free_cash_flow: bool = False
+
+    # --- income to the holder ------------------------------------------------
+    min_dividend_yield: Optional[float] = None
+    max_dividend_payout: Optional[float] = None
+
+    # --- the street's own view -----------------------------------------------
+    #: TradingView's analyst mark: 0 = strong sell ... 5 = strong buy.
+    min_analyst_rating: Optional[float] = None
+
+    #: Do not open a position this many calendar days before an earnings release.
+    #: A swing trade held through a report is an unhedgeable overnight gap, and no
+    #: stop survives it - the position opens at the new price. This is the single
+    #: highest-value fundamental gate for a daily workflow, and it needs nothing
+    #: but a date.
+    earnings_blackout_days: int = 2
+
+    #: Also skip names whose earnings date has already passed within this window,
+    #: since the reaction to a print often runs several sessions.
+    earnings_aftermath_days: int = 0
+
+    #: Extra TradingView field names to pull alongside the defaults, for anyone
+    #: extending the gates. Unknown names are dropped with a warning, not fatal.
+    #: Bare `tuple`, not `Tuple[str, ...]`: `_coerce` converts a YAML list to a
+    #: tuple by testing `"tuple" in str(f.type)`, which is case-sensitive and would
+    #: miss the capitalised spelling, leaving a list inside a frozen dataclass.
+    extra_fields: tuple = ()
+
+
+@dataclass(frozen=True)
 class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     costs: CostConfig = field(default_factory=CostConfig)
@@ -188,6 +259,7 @@ class AppConfig:
     monte_carlo: MonteCarloConfig = field(default_factory=MonteCarloConfig)
     data: DataConfig = field(default_factory=DataConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    fundamentals: FundamentalsConfig = field(default_factory=FundamentalsConfig)
 
     #: Provenance only: which ``config/styles/*.yaml`` layer produced this config.
     #: Not a behaviour switch - every field above is already resolved. Recorded so
@@ -262,6 +334,7 @@ _SECTION_TYPES = {
     "monte_carlo": MonteCarloConfig,
     "data": DataConfig,
     "output": OutputConfig,
+    "fundamentals": FundamentalsConfig,
 }
 
 

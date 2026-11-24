@@ -81,6 +81,7 @@
     <label class="mut">Symbol</label><select id="symbol"></select>
   </div>
   <div class="row" style="margin-left:auto">
+    <button id="btnDaily" class="primary">Daily</button>
     <button id="btnSuggest" class="primary">Suggest</button>
     <button id="btnScan">Scan</button>
     <button id="btnRun" class="primary">Run backtest</button>
@@ -108,6 +109,11 @@
     <div class="card">
       <h2>Portfolio equity</h2>
       <div class="body"><div id="equitychart"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Daily briefing — scan, rank, fundamental gates</h2>
+      <div class="body scroll"><div id="dailyTable" class="mut">Press “Daily”.</div></div>
     </div>
 
     <div class="card">
@@ -201,6 +207,7 @@ async function boot(){
     $(id).addEventListener('change', onConfigChange);
   $('symbol').addEventListener('change', ()=>loadChart());
   $('btnRun').addEventListener('click', runBacktest);
+  $('btnDaily').addEventListener('click', runDaily);
   $('btnSuggest').addEventListener('click', runSuggest);
   $('btnScan').addEventListener('click', runScan);
   $('btnReport').addEventListener('click', loadReport);
@@ -437,6 +444,137 @@ function renderBreakdown(m){
 }
 
 // ------------------------------------------------------------------------ scan
+async function runDaily(){
+  busy(true);
+  try{
+    const tf = $('timeframe').value;
+    const r = await api(`/api/daily?timeframe=${tf}&fundamentals=1`);
+
+    // The advisory leads, always. A panel that rendered the ranked table first and
+    // mentioned validity afterwards would already have framed an unvalidated
+    // strategy as advice, which is the one thing this dashboard must not do.
+    const colour = r.is_validated ? '#30a46c' : (r.study_verdict ? '#e5484d' : '#f5a623');
+    let h = `<div class="note" style="margin-bottom:8px;border-left:3px solid ${colour};
+             padding-left:8px"><b style="color:${colour}">${escapeHtml(r.advisory||'')}</b></div>`;
+
+    h += `<div class="note" style="margin-bottom:8px">${escapeHtml(r.as_of||'')} ·
+      ${escapeHtml(r.market||'')} / ${escapeHtml(r.style||'')} /
+      ${escapeHtml(r.strategy||'')} / ${escapeHtml(r.timeframe||'')}<br>
+      scanned <b>${r.symbols_scanned}</b> · signals <b>${r.signals_found}</b> ·
+      shortlist <b>${r.n_shortlist}</b> · rejected on cost
+      <b>${r.n_rejected_technical}</b> · screened on fundamentals
+      <b>${r.n_rejected_fundamental}</b></div>`;
+
+    // Notes carry the caveats each stage produced: an unreadable study report, a
+    // fundamental outage, gates configured with no thresholds. They are separate
+    // from outcome_detail because that one describes how the run ended.
+    for(const n of (r.notes||[]))
+      h += `<div class="note" style="margin-bottom:6px;color:#f5a623">⚠ ${escapeHtml(n)}</div>`;
+
+    if(r.n_data_errors){
+      h += `<div class="note" style="margin-bottom:6px;color:#f5a623">${r.n_data_errors}
+            symbol(s) failed to load — the shortlist covers the rest.</div>`;
+    }
+
+    // A fundamental outage must be loud. Silence would read as "screened and clean",
+    // which is the opposite of the truth, and the earnings gate is the one whose
+    // absence can cost a real gap.
+    if(r.fundamentals_error){
+      h += `<div class="err" style="margin-bottom:8px"><b>Fundamentals were NOT
+            applied.</b><br>${escapeHtml(String(r.fundamentals_error).split('\n')[0])}
+            <br><span class="mut">Names below are therefore not screened for valuation,
+            balance sheet or an imminent earnings release.</span></div>`;
+    }
+
+    // data_failure means every symbol failed to load. That is not a quiet market,
+    // and presenting it as one hides an outage behind reassuring wording.
+    if(r.outcome === 'data_failure'){
+      h += `<div class="err"><b>Nothing was scanned — this is a data failure, not a
+            market verdict.</b><br>${escapeHtml(r.outcome_detail||'')}</div>`;
+      const de = r.data_errors||{};
+      for(const k of Object.keys(de).slice(0,5))
+        h += `<div class="note"><b>${escapeHtml(k)}</b> — ${escapeHtml(de[k])}</div>`;
+      $('dailyTable').innerHTML = h;
+      return;
+    }
+
+    if(!r.shortlist.length){
+      h += `<div class="note">Nothing qualifies today.
+            ${escapeHtml(r.outcome_detail||'')}<br><span class="mut">This is the normal
+            state — a setup requiring bias + sweep + confirmation should not fire
+            often.</span></div>`;
+      for(const x of (r.rejected_fundamental||[]).slice(0,10))
+        h += `<div class="note" style="margin-top:6px"><b>${escapeHtml(x.symbol)}</b>
+              <span class="mut">${escapeHtml(x.status)}</span> —
+              ${escapeHtml(x.detail)}</div>`;
+      for(const x of (r.rejected_technical||[]).slice(0,10))
+        h += `<div class="note" style="margin-top:6px"><b>${escapeHtml(x.symbol)}</b>
+              rejected — ${x.reasons.map(e=>escapeHtml(e)).join('; ')}</div>`;
+      $('dailyTable').innerHTML = h;
+      return;
+    }
+
+    h += '<table><tr><th>#</th><th>Symbol</th><th>Side</th><th>Last</th><th>Stop</th>'
+       + '<th>Target</th><th>R:R</th><th>stop%</th><th>cost R</th><th>breakeven</th>'
+       + '<th>score</th><th>Sector</th><th>Mkt cap</th><th>P/E</th><th>ROE</th>'
+       + '<th>Earnings</th><th>Fundamentals</th></tr>';
+
+    r.shortlist.forEach((x,i)=>{
+      const fs = x.fundamental_status || (r.fundamentals_error ? 'not screened' : '—');
+      const pill = fs==='approved' ? '<span class="pill long">approved</span>'
+                 : fs==='unrated'  ? '<span class="pill">unrated</span>'
+                 : fs==='not screened' ? '<span class="pill short">not screened</span>'
+                 : `<span class="mut">${escapeHtml(fs)}</span>`;
+      // Days to earnings is shown, and highlighted inside a fortnight: outside the
+      // blackout but still inside a swing hold is a risk the row should state.
+      const d2e = (x.days_to_earnings==null) ? '—'
+                : (x.days_to_earnings<=14
+                    ? `<b style="color:#f5a623">${x.days_to_earnings}d</b>`
+                    : `${x.days_to_earnings}d`);
+      h += `<tr><td>${i+1}</td><td><b>${escapeHtml(x.symbol)}</b></td>
+            <td>${x.side==='long'?'<span class="pos">long</span>':'<span class="neg">short</span>'}</td>
+            <td>${fmt(x.last,4)}</td><td>${fmt(x.stop,4)}</td><td>${fmt(x.target,4)}</td>
+            <td>${fmt(x.rr,2)}</td><td>${fmt(x.risk_pct*100,2)}</td>
+            <td>${fmt(x.cost_in_r,2)}</td>
+            <td><b>${fmt(x.breakeven_win_rate*100,1)}%</b></td>
+            <td>${fmt(x.quality_score,3)}</td>
+            <td class="mut">${escapeHtml(x.sector||'—')}</td>
+            <td>${x.market_cap==null?'—':fmtCap(x.market_cap)}</td>
+            <td>${x.pe_ttm==null?'—':fmt(x.pe_ttm,1)}</td>
+            <td>${x.roe==null?'—':fmt(x.roe*100,1)+'%'}</td>
+            <td>${d2e}</td><td>${pill}</td></tr>`;
+    });
+    $('dailyTable').innerHTML = h + '</table>';
+
+    const top = r.shortlist[0];
+    let d = `<div class="note" style="margin-top:12px"><b>Top of the list:
+             ${escapeHtml(top.symbol)} ${top.side}</b> — entry ~${fmt(top.last,4)},
+             stop ${fmt(top.stop,4)} (${fmt(top.risk_pct*100,2)}%), target
+             ${fmt(top.target,4)}.</div>`;
+    if(top.fundamental_detail)
+      d += `<div class="note" style="margin-top:4px"><span class="mut">fundamentals:
+            ${escapeHtml(top.fundamental_detail)}</span></div>`;
+    for(const w of (top.warnings||[]))
+      d += `<div class="note" style="margin-top:4px">⚠ ${escapeHtml(w)}</div>`;
+    d += `<div class="note" style="margin-top:10px">Run this daily and keep the journal:
+          <code>${escapeHtml(r.journal_path||'')}</code>. A recommendation you cannot
+          look back at is unfalsifiable.</div>`;
+    $('dailyTable').insertAdjacentHTML('beforeend', d);
+  }catch(e){ showErr('dailyTable', e) } finally { busy(false) }
+}
+
+// Market cap is scaled rather than printed raw (3200000000000 is unreadable) and
+// left in the currency the scanner reported, because normalising to USD here would
+// be a claim about an exchange rate this function has never seen.
+function fmtCap(v){
+  if(v==null || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if(a>=1e12) return fmt(v/1e12,1)+'T';
+  if(a>=1e9)  return fmt(v/1e9,1)+'B';
+  if(a>=1e6)  return fmt(v/1e6,1)+'M';
+  return fmt(v,0);
+}
+
 async function runSuggest(){
   busy(true);
   try{

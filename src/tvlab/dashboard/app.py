@@ -31,10 +31,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..config import CONFIG_DIR, REPO_ROOT, AppConfig, load_config
+from ..data.fundamentals import FUNDAMENTAL_MARKETS, fetch_fundamentals
 from ..data.store import DataStore
 from ..indicators.smc import smc_features
 from ..indicators.technical import adx, atr, ema, rsi, supertrend
 from ..pipeline import build_strategy, effective_config, run_study
+from ..screener.daily import journal_path, read_journal
 from ..strategy import available as available_strategies
 from ..strategy.base import trend_filter
 
@@ -484,6 +486,84 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                      "validated as profitable; `tvlab study` decides that, and its current "
                      "verdict is NOT VALIDATED."),
         })
+
+    # ------------------------------------------------------------------- daily
+    @app.get("/api/daily")
+    def api_daily(
+        symbols: Optional[str] = Query(None),
+        timeframe: Optional[str] = Query(None),
+        top: int = Query(10, ge=1, le=500),
+        trendlines: bool = Query(False, description="fit diagonal support/resistance"),
+        max_breakeven: float = Query(0.60, ge=0.05, le=1.0),
+        fundamentals: bool = Query(True, description="apply the fundamental gates"),
+        journal: bool = Query(False, description="append this run to the daily journal"),
+    ) -> Dict[str, Any]:
+        """The daily briefing: the same composition ``tvlab daily`` runs.
+
+        Both delegate to :mod:`tvlab.screener.daily`, so the browser and the terminal
+        cannot disagree about today's list - the same arrangement that keeps
+        ``/api/suggest`` and ``tvlab suggest`` from drifting.
+
+        The payload leads with ``advisory`` and ``is_validated`` rather than with the
+        shortlist. A UI that renders ranked candidates first and mentions their
+        validity status in a footnote has already framed an unvalidated strategy as
+        advice, so the verdict is a top-level field the panel is expected to show
+        above the table.
+
+        ``journal=true`` appends to ``output/daily/journal.jsonl``. It defaults to
+        false because a GET that writes is a surprise, and a dashboard that polls
+        would otherwise fill the journal with duplicates of the same morning.
+        """
+        from ..screener import SCAN_BARS, scan_universe
+        from ..screener.daily import append_journal, build_briefing
+
+        c = state.cfg
+        if timeframe:
+            c = c.merge({"timeframe.execution": timeframe})
+        syms = ([s.strip() for s in symbols.split(",")] if symbols
+                else list(c.universe.symbols))
+
+        store = DataStore(c)
+        rows, errors = scan_universe(store, c, syms, strat=build_strategy(c),
+                                     timeframe=c.timeframe.execution, bars=SCAN_BARS,
+                                     with_trendlines=trendlines)
+
+        measured = None
+        try:
+            from ..cli import _measured_win_rate
+
+            measured = _measured_win_rate(c, c.strategy.name)
+        except Exception as exc:  # noqa: BLE001 - a missing report is not an API failure
+            log.debug("no measured win rate available: %s", exc)
+
+        snaps, fund_error = None, None
+        want = bool(fundamentals and c.fundamentals.enabled)
+        if want and c.universe.market not in FUNDAMENTAL_MARKETS:
+            fund_error = (f"market '{c.universe.market}' has no earnings, book value or "
+                          f"analyst coverage, so there is nothing to gate on")
+        elif want and rows:
+            try:
+                snaps = fetch_fundamentals([r.symbol for r in rows],
+                                           market=c.universe.market,
+                                           max_symbols=max(len(rows), 200),
+                                           extra_fields=c.fundamentals.extra_fields)
+            except Exception as exc:  # noqa: BLE001 - an outage is a coverage fact
+                fund_error = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+        b = build_briefing(rows, errors, c, snaps=snaps, study=measured,
+                           max_breakeven=max_breakeven, top=top,
+                           fundamentals_error=fund_error)
+        if journal:
+            try:
+                append_journal(b, REPO_ROOT / c.output.dir)
+            except Exception as exc:  # noqa: BLE001 - never fail the briefing on this
+                log.warning("could not journal the daily run: %s", exc)
+
+        payload = b.to_dict()
+        payload["fundamentals_error"] = fund_error
+        payload["journal_path"] = str(journal_path(REPO_ROOT / c.output.dir))
+        payload["recent_runs"] = read_journal(REPO_ROOT / c.output.dir, limit=10)
+        return _json_safe(payload)
 
     # ------------------------------------------------------------------ report
     @app.get("/api/report")

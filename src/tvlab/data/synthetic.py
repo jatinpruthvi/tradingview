@@ -214,14 +214,20 @@ def generate(
         index=idx,
     )
 
+    # Ground truth is attached BEFORE the session filter, not after. `_apply_session`
+    # keeps only in-session bars, so assigning these at full `n` length afterwards
+    # raises "Length of values (n) does not match length of index (m)" for every
+    # non-crypto market at every bar count - the filter is what makes the lengths
+    # differ. Filtering first also keeps the regime labels aligned with the bars
+    # they describe, which a post-hoc positional assignment could never guarantee.
+    df["_regime"] = [REGIME_NAMES[s] for s in states]
+    df["_realised_vol"] = vol
+
     if spec.inject_sweeps:
         df = _inject_sweeps(df, spec, rng)
 
     if spec.market != "crypto" and timeframe_seconds(timeframe) < INTRADAY_SECONDS:
         df = _apply_session(df, spec, rng)
-
-    df["_regime"] = [REGIME_NAMES[s] for s in states]
-    df["_realised_vol"] = vol
     # validate_ohlcv preserves "_"-prefixed ground-truth columns and .attrs
     return validate_ohlcv(df, spec.symbol)
 

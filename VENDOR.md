@@ -13,12 +13,21 @@ Rebuild with `./scripts/fetch-vendor.sh`.
 reason, and for four of them the reason is a licence that would be violated by
 copying.
 
+A second audit pass went looking for capability that was vendored but unused, on
+the reasonable suspicion that "used" had been judged too narrowly. It found one:
+`tvscreener` had been characterised as a universe screener when it also carries a
+278-line fundamentals module, a websocket quote/study client, **3,666 `StockField`
+members** (mostly fundamental) and calendar/news/peers/options/rates APIs. The
+fundamentals are now used — see §4, which also records what is still unused and why
+each item was left out rather than adopted. The other 17 entries were re-checked and
+their verdicts stand.
+
 | # | Repository | Licence | Verdict |
 |--:|:-----------|:--------|:--------|
 | 1 | heysanjeevv/market-lab | MIT | **Used** — NSE data layer |
 | 2 | tradingview/lightweight-charts | Apache-2.0 | **Used** — dashboard charting |
 | 3 | joshyattridge/smart-money-concepts | MIT | **Used** — cross-validation only |
-| 4 | deepentropy/tvscreener | Apache-2.0 | **Used** — universe screener |
+| 4 | deepentropy/tvscreener | Apache-2.0 | **Used** — universe screener + fundamentals |
 | 5 | ednunezg/pytrendline | MIT | **Rejected, reimplemented** |
 | 6 | shner-elmo/TradingView-Screener | MIT | Reference — superseded for India by #1 |
 | 7 | atilaahmettaner/tradingview-mcp | MIT | Reference — separate MCP server |
@@ -127,19 +136,108 @@ quarantine stands on non-causality, not on the direction of the distortion — a
 look-ahead bug that makes results look *worse* is still meaningless, and is arguably
 more dangerous, because a bad backtest does not invite suspicion.
 
-### 4. `tvscreener` (Apache-2.0) — universe screener
+### 4. `tvscreener` (Apache-2.0) — universe screener **and** fundamentals
 
 **Taken:** the PyPI package `tvscreener`, for pulling a ranked universe from
-TradingView's scanner.
+TradingView's scanner — and, since the audit below, for fundamentals.
 
-**Lives in:** `src/tvlab/data/tv_screener_source.py`, reachable via
-`--data-source tvscreener` and `tvlab scan --screener`.
+**Lives in:** `src/tvlab/data/tv_screener_source.py` (universe), reachable via
+`--data-source tvscreener` and `tvlab scan --screener`; and
+`src/tvlab/data/fundamentals.py` (fundamentals), reachable via `tvlab daily`,
+`GET /api/daily` and the `fundamentals:` config section.
 
 **Caveats:** the documented import paths in its README (`tvscreener.core.stock`,
 `tvscreener.screener`) do not exist; the working classes are `StockScreener` and
 `CryptoScreener` from the package root, so every access is `hasattr`-guarded. It
 has never been executed against the live endpoint from this repo — no network
 route — so it is best treated as unverified.
+
+#### What the audit found
+
+This section used to describe `tvscreener` as a "universe screener", which
+understated it badly enough to be worth recording. Introspecting the installed
+0.8.2 package locally — no network needed for any of this — shows:
+
+| Surface | Size | Used here? |
+|:--------|:-----|:-----------|
+| `StockField` enum members | **3,666**, mostly fundamental | 29 canonical fields via `FIELD_CANDIDATES` |
+| `fundamentals.py` | 278 lines | no — see below |
+| `_websocket.py` quote/study client | live streaming + `run_studies` | no |
+| calendars | earnings, dividends, IPO, economic | no |
+| screeners | `Index`, `ETF`, `Forex`, `Futures`, `Coin`, `Bond`, `GovernmentBond`, `Economics`, `Option` | only `Stock` and `Crypto` |
+| other | `get_peers`, `get_news`, `get_earnings_calls`, `get_documents`, presets, options surfaces, yield curves, a `ta` module, an MCP server | no |
+
+Each member's `.value` is a 5-tuple `(display_name, scanner_column, format, bool,
+bool)`, e.g. `MARKET_CAPITALIZATION → ('Market Capitalization', 'market_cap_basic',
+'currency', False, False)`. The **second** element is the column the scanner
+actually returns, and `tvscreener` builds its request as `{field_name: label}` —
+so a frame can be keyed by either, depending on version. `_column_lookup` indexes
+both. Matching only one convention produces an all-`None` table that looks exactly
+like a market with no fundamentals, which is why this is worth stating.
+
+`tests/test_fundamentals.py` asserts that all 29 canonical fields still resolve
+against the installed enum, so an upstream rename fails in CI rather than as a
+silently empty column.
+
+Field names verified present (probe with `hasattr` before coding against any of
+them): `MARKET_CAPITALIZATION`, `PRICE_TO_EARNINGS_RATIO_TTM`, `PRICE_TO_BOOK_MRQ`
+/ `_FY`, `PRICE_TO_SALES_FY`, `ENTERPRISE_VALUEEBITDA_TTM`, `GROSS_MARGIN_TTM`,
+`OPERATING_MARGIN_TTM`, `NET_MARGIN_TTM`, `RETURN_ON_EQUITY_TTM` / `_FY`,
+`RETURN_ON_ASSETS_TTM`, `RETURN_ON_INVESTED_CAPITAL_TTM`, `DIVIDENDS_YIELD_CURRENT`,
+`DIVIDEND_PAYOUT_RATIO_TTM`, `BASIC_EPS_TTM`, `EPS_DILUTED_TTM`,
+`NET_INCOME_FY`, `FREE_CASH_FLOW_TTM`, `DEBT_TO_EQUITY_FQ`, `CURRENT_RATIO_FQ`,
+`CASH_DIVIDEND_COVERAGE_RATIO_TTM`, `SECTOR`, `INDUSTRY`, `RECENT_EARNINGS_DATE`,
+`UPCOMING_EARNINGS_DATE`, `BETA_3_YEAR` / `_5_YEAR`, `RECOMMENDATION_MARK`.
+
+Growth naming is irregular, so the canonical names were chosen from what actually
+exists rather than from what reads naturally: revenue growth is
+`REVENUE_TTM_YOY_GROWTH` (also `REVENUE_ANNUAL_YOY_GROWTH`), and EPS growth is
+`EPS_DILUTED_TTM_YOY_GROWTH`.
+
+**Names that do NOT exist** — verified by `hasattr` against the installed enum, and
+recorded because guessing them is the fastest way to a silent `None`: there is no
+`BETA_1_YEAR`, no `CLOSE` (prices are `PRICE`), no `MARKET_CAP` (it is
+`MARKET_CAPITALIZATION`), no `REVENUE_GROWTH_FY`, no `EPS_GROWTH_FY`, no
+`DEBT_TO_EQUITY_MRQ`, and no `ANALYST*` or `RATING*` stock field. Analyst consensus
+is `RECOMMENDATION_MARK` plus `RECOMMENDATION_{BUY,HOLD,OVER,UNDER,SELL,TOTAL}` and
+`RECOMMEND_ALL_1`.
+
+An earlier draft of `FIELD_CANDIDATES` listed eight of those non-existent names as
+"alternates", on the theory that a future version might use them. They were removed:
+a fallback for a spelling that has never existed cannot be tested, so it is not a
+safeguard, it is an unverified claim sitting in a table that looks authoritative.
+`tests/test_fundamentals.py::test_no_candidate_name_is_speculative` now fails if any
+name in the table is absent from the enum, and
+`test_every_canonical_field_resolves_against_the_installed_enum` fails if a
+canonical field stops resolving at all.
+
+#### Why the rest is not used
+
+Not neglect — each has a reason, and the reasons are the useful part:
+
+- **`fundamentals.get_financials`** (statement history, ~20 fiscal years and 32
+  quarters) is the right tool for computing growth and quality *trends* rather than
+  reading TradingView's pre-computed ratios. It reads TradingView's data websocket.
+  Left out because the gates here are deliberately simple vetoes, and a 20-year
+  statement history invites exactly the fitted composite score that
+  `screener/fundamental.py` refuses to build.
+- **`get_corporate_events`** returns dividends, splits *and* earnings releases. The
+  earnings date is already taken from `UPCOMING_EARNINGS_DATE` in the same scanner
+  call, so this would be a second request for one field — but it is the correct
+  source if the blackout ever needs dividends or splits too.
+- **`_websocket.run_studies` / `stream_quotes`** would give live prices instead of a
+  point-in-time snapshot. Not used because every consumer here is a daily batch;
+  a streaming client that nothing polls is a connection that only fails.
+- **The other screeners** (`Bond`, `Option`, `Economics`, …) have no counterpart in
+  the four configured markets. `IndexScreener` is the nearest thing to a useful
+  addition — regime context for the bias filter — and is recorded as the first
+  candidate if this grows.
+- **Calendars** would let the daily run warn about macro events the way it warns
+  about earnings. Held back because an economic calendar has no obvious gate: unlike
+  an earnings date, there is no defensible rule for how many days before a CPI print
+  a swing trade becomes untradeable.
+- **`tvscreener.mcp`** is a server exposing this same data to an MCP client. Not
+  used; this repo is the client.
 
 ---
 
@@ -432,6 +530,13 @@ licence means all rights reserved, not public domain. Educational reference only
 | `adx` cross-validated against `ta.dmi` — the last unvalidated indicator in a live decision path | `scripts/vendor_xval_indicator.py`, `tests/test_pynecore_reference.py`, `src/tvlab/indicators/technical.py` |
 | The #3 quarantine made machine-enforced instead of prose | `tests/test_reference_quarantine.py` (new) |
 | The unsourced "inflates PF to 3–10" claim replaced with a measurement | `README.md`, `VENDOR.md`, `tests/test_reference_quarantine.py` |
+| **#4's fundamentals surface adopted** — 29 canonical fields, resolved by name *and* label | `src/tvlab/data/fundamentals.py` (new) |
+| Fundamental gates: veto, never weight; missing data is a third outcome | `src/tvlab/screener/fundamental.py` (new), `src/tvlab/config.py` |
+| `fundamentals:` section, risk gates on and valuation gates deliberately `null` | `config/markets/us_equities.yaml`, `config/markets/indian_equities.yaml` |
+| The daily workflow: scan + rank + gates, verdict attached, journal written | `src/tvlab/screener/daily.py` (new) |
+| `tvlab daily`, `GET /api/daily`, dashboard Daily panel | `src/tvlab/cli.py`, `src/tvlab/dashboard/app.py`, `dashboard/static/index.html` |
+| **Session-filter crash fixed** — every non-crypto market was unusable on synthetic data | `src/tvlab/data/synthetic.py` |
+| 126 more tests | `tests/test_fundamentals.py`, `tests/test_daily_workflow.py`, `tests/test_cli_daily.py`, `tests/test_dashboard_daily.py`, `tests/test_synthetic_session_filter.py` |
 
 **Still open, in rough order of value:**
 
@@ -446,7 +551,20 @@ licence means all rights reserved, not public domain. Educational reference only
    about all along.
 2. Verify the NSE and Yahoo payload shapes against the live APIs. They are
    reconstructed, not captured. This one cannot be closed from a sandbox with no
-   route to NSE or Yahoo — it needs a networked machine.
+   route to NSE or Yahoo — it needs a networked machine. **This now includes
+   `tvscreener`'s fundamentals response**, which is the largest unverified surface
+   in the repo: `data/fundamentals.py` has never reached
+   `scanner.tradingview.com`, so its parsing is tested against fixtures built to
+   match both column conventions rather than against a capture. What *is* verified
+   without a network is the field table — all 29 canonical names resolve against
+   the installed enum, and two tests fail if that stops being true.
+4. `IndexScreener` for regime context. The bias filter currently reads the trend of
+   the symbol's own higher timeframe; an index-level read would separate "this stock
+   is trending" from "the market is trending", which is the distinction that decides
+   whether a long setup is a trade or a counter-trend catch. Not built because it
+   cannot be validated here, and an unvalidated extra filter is exactly what the
+   `entry_mode` measurement showed makes results worse while looking more
+   sophisticated.
 3. ~~`screener/scanner.py` still carries its own `DEFAULT_CORR_THRESHOLD = 0.70`.~~
    **Closed, and this note was wrong when written.** `grep -n "corr" scanner.py`
    returns nothing: the scanner never grouped positions, so there was no second
