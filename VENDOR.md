@@ -537,6 +537,13 @@ licence means all rights reserved, not public domain. Educational reference only
 | `tvlab daily`, `GET /api/daily`, dashboard Daily panel | `src/tvlab/cli.py`, `src/tvlab/dashboard/app.py`, `dashboard/static/index.html` |
 | **Session-filter crash fixed** — every non-crypto market was unusable on synthetic data | `src/tvlab/data/synthetic.py` |
 | 133 more tests | `tests/test_fundamentals.py` (43), `tests/test_daily_workflow.py` (36), `tests/test_cli_daily.py` (16), `tests/test_dashboard_daily.py` (13), `tests/test_synthetic_session_filter.py` (25) |
+| **The journal-scoring claim backed by an implementation** — six prose sites promised "in a month you can score the shortlists" and nothing did the scoring | `src/tvlab/screener/review.py` (new) |
+| `tvlab review`, `GET /api/review`, dashboard Review panel — one scorer, one fetcher, shared by both | `src/tvlab/cli.py`, `src/tvlab/dashboard/app.py`, `dashboard/static/index.html` |
+| Fill conventions shared with the backtester rather than reinvented (pessimistic intrabar tie, no exit on the entry bar) | `src/tvlab/screener/review.py`, matching `src/tvlab/backtest/engine.py` |
+| Entry-drift guard: a fetch that does not reproduce the journaled entry price is refused, not scored | `src/tvlab/screener/review.py` |
+| `OUTCOMES` / `SCORED_OUTCOMES` pinned, so a sixth state lands on the refusal side by default | `src/tvlab/screener/review.py` |
+| 78 more tests | `tests/test_review.py` (44), `tests/test_cli_review.py` (19), `tests/test_dashboard_review.py` (15) |
+| Two brittle JS-boundary fixtures made order-independent | `tests/test_dashboard_daily.py`, `tests/test_dashboard_review.py` |
 
 **Still open, in rough order of value:**
 

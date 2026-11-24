@@ -82,6 +82,7 @@
   </div>
   <div class="row" style="margin-left:auto">
     <button id="btnDaily" class="primary">Daily</button>
+    <button id="btnReview">Review journal</button>
     <button id="btnSuggest" class="primary">Suggest</button>
     <button id="btnScan">Scan</button>
     <button id="btnRun" class="primary">Run backtest</button>
@@ -114,6 +115,11 @@
     <div class="card">
       <h2>Daily briefing — scan, rank, fundamental gates</h2>
       <div class="body scroll"><div id="dailyTable" class="mut">Press “Daily”.</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Journal review — what past shortlists actually did</h2>
+      <div class="body scroll"><div id="reviewTable" class="mut">Press “Review journal”.</div></div>
     </div>
 
     <div class="card">
@@ -208,6 +214,7 @@ async function boot(){
   $('symbol').addEventListener('change', ()=>loadChart());
   $('btnRun').addEventListener('click', runBacktest);
   $('btnDaily').addEventListener('click', runDaily);
+  $('btnReview').addEventListener('click', runReview);
   $('btnSuggest').addEventListener('click', runSuggest);
   $('btnScan').addEventListener('click', runScan);
   $('btnReport').addEventListener('click', loadReport);
@@ -558,9 +565,138 @@ async function runDaily(){
       d += `<div class="note" style="margin-top:4px">⚠ ${escapeHtml(w)}</div>`;
     d += `<div class="note" style="margin-top:10px">Run this daily and keep the journal:
           <code>${escapeHtml(r.journal_path||'')}</code>. A recommendation you cannot
-          look back at is unfalsifiable.</div>`;
+          look back at is unfalsifiable — once enough bars have printed, press
+          <b>Review journal</b> to score what was suggested.</div>`;
     $('dailyTable').insertAdjacentHTML('beforeend', d);
   }catch(e){ showErr('dailyTable', e) } finally { busy(false) }
+}
+
+// ---------------------------------------------------------------------- review
+async function runReview(){
+  busy(true);
+  try{
+    const tf = $('timeframe').value;
+    const r = await api(`/api/review?horizon=90&timeframe=${tf}`);
+
+    // Coverage leads, not the win rate. A rate printed above its denominator reads as
+    // a verdict, and the first honest fact about a review is how much of the journal
+    // could actually be scored.
+    if(!r.available){
+      $('reviewTable').innerHTML =
+        `<div class="note"><b>Nothing to review yet.</b><br>
+         <span class="mut">${escapeHtml(r.detail||'')}</span><br>
+         <span class="mut">${escapeHtml(r.next_step||'')}</span></div>`;
+      return;
+    }
+
+    // Stated before any number, because on synthetic data every rate below measures
+    // the data generator rather than a market.
+    if(r.measures_generator_not_market){
+      $('reviewTable').innerHTML =
+        `<div class="err" style="margin-bottom:8px"><b>Synthetic source.</b> Any win
+         rate below measures the data generator, not a market — the bars are
+         reproducible from a seed and contain no information about real order
+         flow.</div>`;
+    }else{
+      $('reviewTable').innerHTML = '';
+    }
+
+    let h = `<div class="note" style="margin-bottom:8px">${escapeHtml(r.as_of||'')} ·
+      ${r.n_runs} run(s) from ${escapeHtml(r.first_run||'')} to
+      ${escapeHtml(r.last_run||'')} · horizon <b>${r.horizon_bars}</b> bars<br>
+      <b>${escapeHtml(r.coverage||'')}</b></div>`;
+
+    if((r.fetch_errors||[]).length){
+      h += `<div class="err" style="margin-bottom:8px"><b>${r.fetch_errors.length}
+            fetch failure(s)</b> — these symbols are unscorable, not losing:<br>
+            <span class="mut">${escapeHtml(r.fetch_errors.slice(0,5).join(' · '))}</span></div>`;
+    }
+
+    if(r.n_scored === 0){
+      h += `<div class="note" style="margin-bottom:8px"><b>Nothing could be
+            scored.</b><br><span class="mut">No win rate and no expectancy, because
+            there is no outcome to measure yet. This is not a verdict on the
+            strategy.</span></div>`;
+    }else{
+      const clears = r.clears_breakeven;
+      const cWin = clears ? '#30a46c' : '#e5484d';
+      const cExp = (r.expectancy_r||0) > 0 ? '#30a46c' : '#e5484d';
+      h += `<div class="note" style="margin-bottom:8px">
+        win rate <b style="color:${cWin}">${fmt((r.win_rate||0)*100,1)}%</b>
+        <span class="mut">(n=${r.n_scored} of ${r.n_suggestions})</span> —
+        <b style="color:${cWin}">${clears ? 'clears' : 'does NOT clear'}</b> the
+        ${fmt((r.realised_breakeven||0)*100,1)}% this payoff requires<br>
+        expectancy <b style="color:${cExp}">${fmt(r.expectancy_r,3)} R</b> per
+        suggestion, after costs<br>
+        payoff promised <b>${fmt(r.quoted_rr,2)}R:1</b>, realised
+        <b>${fmt(r.realised_payoff_r,2)}R:1</b></div>`;
+
+      // The divergence flag matters more than either rate on its own: the breakeven
+      // quoted when the idea was suggested assumes winners pay the promised R:R, and
+      // comparing a realised rate to it would pass a losing book.
+      if(r.payoff_diverged){
+        h += `<div class="note" style="margin-bottom:6px;color:#f5a623">⚠ winners did
+              not pay what was promised, so the quoted breakeven rate does not apply to
+              this book.</div>`;
+      }
+
+      const outs = r.by_outcome||{};
+      h += `<div class="note" style="margin-bottom:8px"><span class="mut">` +
+           Object.keys(outs).map(k=>`${escapeHtml(k)} <b>${outs[k]}</b>`).join(' · ') +
+           `</span></div>`;
+
+      const scored = (r.rows||[]).filter(x=>x.scored);
+      if(scored.length){
+        h += `<table><thead><tr><th>date</th><th>symbol</th><th>side</th><th>entry</th>
+              <th>exit</th><th>outcome</th><th>R</th><th>net R</th><th>bars</th>
+              <th>max adv</th><th>max fav</th></tr></thead><tbody>`;
+        for(const x of scored){
+          const c = x.is_win ? '#30a46c' : '#e5484d';
+          h += `<tr><td>${escapeHtml(x.as_of||'')}</td><td>${escapeHtml(x.symbol||'')}</td>
+                <td>${escapeHtml(x.side||'')}</td><td>${fmt(x.entry,4)}</td>
+                <td>${fmt(x.exit_price,4)}</td>
+                <td style="color:${c}">${escapeHtml(x.outcome||'')}</td>
+                <td style="color:${c}">${fmt(x.r_multiple,2)}</td>
+                <td style="color:${c}">${fmt(x.net_r,2)}</td>
+                <td>${x.bars_observed}</td>
+                <td>${fmt(x.max_adverse_r,2)}</td>
+                <td>${fmt(x.max_favourable_r,2)}</td></tr>`;
+        }
+        h += `</tbody></table>`;
+      }
+    }
+
+    // Unscorable and open rows are listed with their reason. Hiding them behind a
+    // count would leave the reader unable to tell an outage from a young idea.
+    const unscorable = (r.rows||[]).filter(x=>!x.scored && x.outcome !== 'open');
+    if(unscorable.length){
+      h += `<div class="note" style="margin-top:10px"><span class="mut">Unscorable
+            (${unscorable.length}) — excluded from every rate above:</span></div>`;
+      for(const x of unscorable)
+        h += `<div class="note" style="margin-bottom:4px"><span class="mut">
+              ${escapeHtml(x.as_of||'')} ${escapeHtml(x.symbol||'')} —
+              ${escapeHtml(x.note||'')}</span></div>`;
+    }
+    const open = (r.rows||[]).filter(x=>x.outcome === 'open');
+    if(open.length){
+      h += `<div class="note" style="margin-top:10px"><span class="mut">Still open
+            (${open.length}) — not enough bars have printed to judge these
+            yet:</span></div>`;
+      for(const x of open)
+        h += `<div class="note" style="margin-bottom:4px"><span class="mut">
+              ${escapeHtml(x.as_of||'')} ${escapeHtml(x.symbol||'')} —
+              ${escapeHtml(x.note||'')}</span></div>`;
+    }
+
+    if(r.n_scored){
+      h += `<div class="note" style="margin-top:10px"><span class="mut">n=${r.n_scored}.
+            A win rate over a handful of suggestions describes those suggestions; it is
+            not an estimate of an edge. The study behind this ranking measured 31
+            trades before it was declared NOT VALIDATED.</span></div>`;
+    }
+
+    $('reviewTable').insertAdjacentHTML('beforeend', h);
+  }catch(e){ showErr('reviewTable', e) } finally { busy(false) }
 }
 
 // Market cap is scaled rather than printed raw (3200000000000 is unreadable) and

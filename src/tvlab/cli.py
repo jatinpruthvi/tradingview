@@ -3,6 +3,9 @@
     tvlab markets                       list configured markets and styles
     tvlab data                          fetch/preview data for a universe
     tvlab scan                          screen a universe for setups right now
+    tvlab suggest                       the best idea per symbol, after costs
+    tvlab daily                         scan + rank + fundamental gates, journaled
+    tvlab review                        score that journal against what happened
     tvlab backtest                      single-pass backtest
     tvlab study                         backtest + walk-forward + MC + nulls + report
     tvlab compare                       run every strategy side by side
@@ -18,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -490,8 +493,14 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
 
     Then it appends one line to ``output/daily/journal.jsonl``. That is the point of
     running it daily rather than once: a recommendation you cannot look back at is
-    unfalsifiable, so nothing is ever checked and nothing is ever learned. In a
-    month you can score the shortlists against what actually happened.
+    unfalsifiable, so nothing is ever checked and nothing is ever learned. Come back
+    later and score it with ``tvlab review``, which replays each journaled suggestion
+    against the bars that followed and reports what it did in R.
+
+    Writing the journal and scoring it are deliberately separate commands. This one
+    runs every morning whether or not there is anything to score; ``review`` only
+    becomes useful once enough bars have printed for the ideas to have resolved, and
+    it says so rather than reporting a rate over one suggestion.
 
     \b
     What this is NOT
@@ -680,8 +689,10 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
 
     if not no_journal:
         jp = append_journal(b, REPO_ROOT / cfg.output.dir)
-        console.print(f"\n[dim]journaled: {jp}  (score these against what happens - a "
-                      f"recommendation you cannot look back at is unfalsifiable)[/dim]")
+        console.print(f"\n[dim]journaled: {jp}[/dim]")
+        console.print("  [dim]a recommendation you cannot look back at is unfalsifiable. "
+                      "Once enough bars have printed, score it:[/dim]")
+        console.print(f"    [dim]tvlab review --market {mkt} --style {b.style}[/dim]")
 
 
 def _mcap(v: Optional[float], symbol: str) -> str:
@@ -697,6 +708,258 @@ def _mcap(v: Optional[float], symbol: str) -> str:
         if abs(v) >= div:
             return f"{v / div:,.1f}{suf}"
     return f"{v:,.0f}"
+
+
+# ---------------------------------------------------------------------- review
+@cli.command(name="review")
+@click.option("--market", default=None)
+@click.option("--style", default=None)
+@click.option("--config", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
+@click.option("--data-source", default=None,
+              help="synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart")
+@click.option("--timeframe", default=None,
+              help="replay every run at this timeframe instead of the one it recorded")
+@click.option("--horizon", type=int, default=90, show_default=True,
+              help="bars to give each idea before marking it to market")
+@click.option("--days", type=int, default=None,
+              help="review only the most recent N journal runs")
+@click.option("--top", type=int, default=40, show_default=True,
+              help="how many scored rows to print")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="emit the summary as JSON instead of a table")
+def review_journal(market, style, config, set_pairs, data_source, timeframe,
+                   horizon, days, top, as_json) -> None:
+    """Score the journal: what the daily shortlists actually did.
+
+    ``tvlab daily`` appends every shortlist to ``output/daily/journal.jsonl``. This
+    command replays each of those suggestions against the bars that followed it and
+    reports what happened, in R - the same unit the suggestion was quoted in.
+
+    Each idea becomes one of five things, and the distinction is the point:
+
+    \b
+    take_profit   the target was reached
+    stop_loss     the stop was reached
+    time_exit     the horizon elapsed with neither level touched, marked to market
+    open          not enough bars yet - still running, counted as neither win nor loss
+    unscorable    no prices, no stop, or the prices fetched are not the ones this idea
+                  was based on
+
+    Counting an idea that is still running as a loss, or one that could not be priced
+    as a failure, is how a review turns into a number that flatters or damns the
+    strategy for reasons that have nothing to do with it.
+
+    \b
+    What the numbers mean
+    ---------------------
+    ``win rate`` is reported against the breakeven implied by the *realised* payoff,
+    not the one quoted when the idea was suggested. A shortlist promising 3:1 needs a
+    28% win rate; the same shortlist whose winners time-exit at +0.5R needs 55%. If
+    winners stopped paying what was promised, the summary says so explicitly rather
+    than passing a losing book.
+
+    ``expectancy`` is the bottom line: mean R per suggestion after costs. It assumes
+    nothing about the shape of the payoff, so it stays meaningful when the win rate
+    does not.
+
+    \b
+    On synthetic data
+    -----------------
+    The default source generates a fixed 4000-bar window ending years in the past.
+    Every suggestion is made on its final bar, so there is no future to replay and
+    every idea comes back ``open`` or ``unscorable``. That is the honest answer: a
+    generator with no bars after today cannot be reviewed, and a win rate computed
+    against it would measure the generator, not a market. Run this against a live or
+    CSV source that has actually accumulated history since you started journaling.
+
+    \b
+    Exit codes
+    ----------
+    0  the journal was read and scored, including when nothing could be scored
+    2  no prices could be fetched for any symbol - a data failure, not a verdict
+    """
+    from .data.store import DataStore
+    from .screener import SCAN_BARS
+    from .screener.daily import journal_path, read_journal
+    from .screener.review import review as score_journal, store_fetcher
+
+    cfg = _cfg(market, style, config, set_pairs, data_source)
+    out_dir = REPO_ROOT / cfg.output.dir
+    jp = journal_path(out_dir)
+
+    entries = list(reversed(read_journal(out_dir, limit=days or 10_000_000)))
+    if not entries:
+        console.print(f"\n[bold]Nothing to review yet.[/bold]")
+        console.print(f"  [dim]no journal at {jp}[/dim]")
+        console.print("\n  Run the daily briefing first - it is what writes the journal:")
+        console.print(f"    [dim]tvlab daily --market {cfg.universe.market} "
+                      f"--style {cfg.style}[/dim]")
+        console.print("  [dim]Then come back after enough bars have printed for the ideas "
+                      "to have resolved. A review run the same morning it was suggested "
+                      "has nothing to say.[/dim]")
+        return
+
+    # Each run carries the timeframe it was made under. Honouring it matters because
+    # the journal accumulates across config changes, and silently changing the
+    # timeframe would change what "90 bars" means.
+    for run in entries:
+        if timeframe:
+            run["timeframe"] = timeframe
+        elif not run.get("timeframe"):
+            run["timeframe"] = cfg.timeframe.execution
+
+    store = DataStore(cfg)
+    fetch_errors: List[str] = []
+    no_future: Dict[str, str] = {}
+
+    # The anchoring lives in screener.review.store_fetcher rather than here, because
+    # GET /api/review needs identical logic and two copies of price anchoring is how a
+    # terminal and a browser end up reporting different outcomes for the same journal.
+    fetch = store_fetcher(store, scan_bars=SCAN_BARS, errors=fetch_errors,
+                          no_future=no_future)
+
+    summary = score_journal(entries, fetch, horizon_bars=horizon,
+                            provenance=cfg.data.source,
+                            as_of=datetime.now(timezone.utc).date().isoformat())
+
+    if as_json:
+        console.print_json(json.dumps(summary.to_dict(), default=str))
+        return
+
+    n_runs = len(entries)
+    console.print(f"\n[bold]Journal review[/bold] - {summary.as_of}  "
+                  f"[dim]{cfg.universe.market} / {cfg.style} / source "
+                  f"{cfg.data.source}[/dim]")
+    console.print(f"  {n_runs} run(s) since {entries[0].get('as_of')}  ·  "
+                  f"{summary.n_suggestions} suggestion(s)  ·  horizon {horizon} bars")
+    console.print(f"  [bold]{summary.coverage}[/bold]")
+
+    if cfg.data.source == "synthetic":
+        # Two different facts, and only the second is always true. Whether the
+        # generated window happens to contain bars after a given suggestion depends on
+        # the date the suggestion was journaled under, so asserting "there are no bars
+        # after any suggestion" would be a claim this code has not checked - the same
+        # class of unbacked assertion the rest of this repo keeps retracting.
+        nothing_scored = summary.n_scored == 0
+        if nothing_scored:
+            console.print("\n  [yellow]Synthetic source: the generated window has no bars "
+                          "after these suggestions, so nothing could be scored. A "
+                          "generator that ends before the journal does cannot be "
+                          "reviewed.[/yellow]")
+            if no_future:
+                sym, why = next(iter(no_future.items()))
+                console.print(f"  [dim]e.g. {sym}: {why}[/dim]")
+        console.print("  [yellow]Synthetic source: any win rate computed here measures "
+                      "the data generator, not a market. The bars are reproducible from "
+                      "a seed and contain no information about real order flow.[/yellow]")
+
+    if fetch_errors:
+        console.print(f"\n  [red]{len(fetch_errors)} fetch failure(s) - these symbols "
+                      f"are unscorable, not losing:[/red]")
+        for e in fetch_errors[:5]:
+            console.print(f"    [red]{e}[/red]")
+        if len(fetch_errors) > 5:
+            console.print(f"    [dim]... and {len(fetch_errors) - 5} more[/dim]")
+
+    scored = [r for r in summary.rows if r.scored]
+    if scored:
+        t = Table(title=f"scored suggestions - {len(scored)} of {summary.n_suggestions}")
+        for col, just in (("date", "left"), ("symbol", "left"), ("side", "left"),
+                          ("entry", "right"), ("exit", "right"), ("outcome", "left"),
+                          ("R", "right"), ("net R", "right"), ("bars", "right"),
+                          ("max adv", "right"), ("max fav", "right")):
+            t.add_column(col, justify=just)
+        for r in scored[:top]:
+            colour = "green" if r.is_win else "red"
+            t.add_row(
+                r.as_of, r.symbol, r.side,
+                f"{r.entry:,.4g}", f"{r.exit_price:,.4g}",
+                f"[{colour}]{r.outcome}[/]",
+                f"[{colour}]{r.r_multiple:+.2f}[/]",
+                f"[{colour}]{r.net_r:+.2f}[/]",
+                str(r.bars_observed),
+                f"{r.max_adverse_r:+.2f}", f"{r.max_favourable_r:+.2f}",
+            )
+        console.print(t)
+        if len(scored) > top:
+            console.print(f"  [dim]... and {len(scored) - top} more scored rows[/dim]")
+
+    unscored = [r for r in summary.rows if not r.scored and r.outcome != "open"]
+    if unscored:
+        console.print(f"\n[dim]Unscorable ({len(unscored)}) - excluded from every rate "
+                      f"below:[/dim]")
+        for r in unscored[:top]:
+            console.print(f"  [dim]{r.as_of}  {r.symbol:<14} {r.note}[/dim]")
+
+    if summary.n_open:
+        console.print(f"\n[dim]Still open ({summary.n_open}) - not enough bars have "
+                      f"printed to judge these yet:[/dim]")
+        for r in [r for r in summary.rows if r.outcome == "open"][:top]:
+            console.print(f"  [dim]{r.as_of}  {r.symbol:<14} {r.note}[/dim]")
+
+    # ---- the verdict, and the reasons not to read too much into it
+    if summary.n_scored == 0:
+        console.print("\n[bold yellow]Nothing could be scored.[/bold yellow]")
+        console.print("  [dim]No win rate, no expectancy - because there is no outcome "
+                      "to measure yet. This is not a verdict on the strategy.[/dim]")
+    else:
+        console.print(f"\n[bold]Outcome over {summary.n_scored} scored suggestion(s)"
+                      f"[/bold]  [dim](of {summary.n_suggestions} journaled)[/dim]")
+        for k in ("take_profit", "stop_loss", "time_exit"):
+            if summary.by_outcome.get(k):
+                console.print(f"  {k:<12} {summary.by_outcome[k]}")
+
+        wr = summary.win_rate or 0.0
+        be = summary.realised_breakeven
+        if summary.n_wins == 0:
+            # A required win rate above 100% is arithmetically what a book with no
+            # winners implies, but printing it as a threshold invites the reader to
+            # think a slightly better win rate would have passed. Say the fact instead.
+            console.print(f"  win rate     [red]0.0%[/red] [dim](n={summary.n_scored})"
+                          f"[/red][/dim]  [red]not one suggestion reached its target "
+                          f"or closed in profit[/red]")
+        elif summary.clears_breakeven is None:
+            console.print(f"  win rate     [yellow]{wr * 100:.1f}%[/yellow] "
+                          f"[dim]- no comparison possible[/dim]")
+        else:
+            c = "green" if summary.clears_breakeven else "red"
+            verb = "clears" if summary.clears_breakeven else "does NOT clear"
+            console.print(f"  win rate     [{c}]{wr * 100:.1f}%[/] "
+                          f"[dim](n={summary.n_scored})[/]  [{c}]{verb}[/] the "
+                          f"{be * 100:.1f}% this payoff requires")
+
+        exp_c = "green" if (summary.expectancy_r or 0) > 0 else "red"
+        console.print(f"  expectancy   [{exp_c}]{summary.expectancy_r:+.3f} R[/] per "
+                      f"suggestion, after costs")
+        console.print(f"  payoff       promised "
+                      f"{(summary.quoted_rr or 0):.2f}R:1, realised "
+                      f"{(summary.realised_payoff_r or 0):.2f}R:1")
+        if summary.payoff_diverged:
+            # Divergence has two causes with different meanings, and only one of them
+            # is about winners underpaying.
+            if summary.n_wins == 0:
+                console.print("  [yellow]! there were no winners at all, so the quoted "
+                              "breakeven rate has nothing to apply to[/yellow]")
+            else:
+                console.print("  [yellow]! winners did not pay what was promised, so the "
+                              "quoted breakeven rate does not apply to this book[/yellow]")
+
+        console.print(f"\n  [dim]n={summary.n_scored}. A win rate on a handful of "
+                      f"suggestions is a description of those suggestions, not an "
+                      f"estimate of an edge: the default study behind this ranking "
+                      f"measured 31 trades before it was declared NOT VALIDATED. "
+                      f"Score this again in a few months.[/dim]")
+
+    if summary.provenance == "synthetic":
+        console.print("  [dim]provenance: SYNTHETIC - any number above measures the "
+                      "data generator, not a market.[/dim]")
+
+    # A total fetch failure is a data outage and gets the same exit code `daily` uses,
+    # because the remedy is the opposite of "wait and see".
+    if summary.n_suggestions and summary.n_scored == 0 and summary.n_open == 0 \
+            and fetch_errors and not scored:
+        raise SystemExit(2)
 
 
 # ------------------------------------------------------------------------ scan

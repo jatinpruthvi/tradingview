@@ -96,11 +96,25 @@ def script_body():
     return m.group(1)
 
 
-def _daily_fn(script_body):
-    start = script_body.index("async function runDaily")
-    end = script_body.index("async function runSuggest")
+def _fn_body(script_body, name):
+    """Slice one top-level function out of the inline script.
+
+    The boundary is *whatever function comes next*, not a hardcoded neighbour. Pinning
+    `runSuggest` as the end of `runDaily` broke the moment a `runReview` was inserted
+    between them: the slice silently absorbed the new function and every `r.<key>` it
+    reads, and the contract test then demanded that `/api/daily` send review fields.
+    Ordering in this file is not part of any contract, so the test must not depend on it.
+    """
+    start = script_body.index(f"function {name}")
+    rest = script_body[start + len(f"function {name}"):]
+    m = re.search(r"\n(?:async\s+)?function\s+\w+\s*\(", rest)
+    end = start + len(f"function {name}") + (m.start() if m else len(rest))
     assert start < end
     return script_body[start:end]
+
+
+def _daily_fn(script_body):
+    return _fn_body(script_body, "runDaily")
 
 
 # --------------------------------------------------------------- serialisation

@@ -16,8 +16,12 @@ It adds two things of its own.
 **A journal.** A daily recommendation you cannot look back at is unfalsifiable: in a
 month nobody remembers what was suggested, so nothing is ever checked. Every run
 appends one JSON line to ``output/daily/journal.jsonl`` and writes the day's full
-briefing to ``output/daily/<date>.json``, so the shortlist can be scored against
-what actually happened. See ``journal.py``.
+briefing to ``output/daily/<date>.json``. The journal functions live in this module
+(``append_journal``, ``read_journal``, ``journal_path``); the scoring of what was
+journaled lives in ``screener/review.py`` and is run with ``tvlab review`` or
+``GET /api/review``. Writing the record and reading it back are separate modules
+because they have opposite failure modes: a journal that fails to write loses
+history, while a scorer that fails to read it invents a verdict.
 
 **The validation verdict, attached to the output.** A study of this strategy on its
 default configuration comes back NOT VALIDATED, 3/8 - it is not distinguishable from

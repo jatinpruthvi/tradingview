@@ -109,16 +109,19 @@ the tool.
 
 tvlab markets                         # what is configured
 tvlab daily    --market us_equities --style swing     # today's shortlist, journaled
+tvlab review   --market us_equities --style swing     # score that journal, later
 tvlab suggest  --market crypto --style swing          # the best idea, after costs
 tvlab scan     --market crypto --style swing          # who is in a setup right now
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 632 tests
+pytest                                                # 710 tests
 ```
 
 `tvlab daily` is the one to schedule. It composes the other three stages and writes
-a record - see [The daily run](#the-daily-run).
+a record - see [The daily run](#the-daily-run). `tvlab review` is the one to come
+back to: it replays each journaled suggestion against the bars that followed and
+reports what it did - see [Scoring the journal](#scoring-the-journal).
 
 ### `tvlab suggest` ranks by expectancy after costs, not by R:R
 
@@ -275,6 +278,62 @@ Each line records the study verdict that was in force, so a past shortlist can b
 judged by what was known when it was made. `--no-journal` turns it off; the dashboard
 only writes with `?journal=true`, because a GET that writes is a surprise and a
 polling browser would fill the file with duplicates.
+
+### Scoring the journal
+
+Writing the record down is only half of falsifiability. `tvlab review` replays each
+journaled suggestion against the bars that followed it and reports what it did, in the
+same R the suggestion was quoted in:
+
+```
+tvlab review --market crypto --style swing --horizon 90
+```
+
+Every idea becomes exactly one of five things, and the distinction is the point:
+
+| outcome | meaning |
+| --- | --- |
+| `take_profit` | the target was reached |
+| `stop_loss` | the stop was reached |
+| `time_exit` | the horizon elapsed with neither level touched — marked to market |
+| `open` | not enough bars yet. Still running, counted as neither win nor loss |
+| `unscorable` | no prices, no stop, or the prices fetched are not the ones this idea was based on |
+
+Counting an idea that is still running as a loss punishes a swing trade for existing;
+counting an idea that could not be priced as a failure turns a data outage into a
+verdict on the strategy. Both are reported separately with their counts, and the
+summary leads with coverage — `4 of 6 scored (1 still open, 1 unscorable)` — rather
+than with a rate whose denominator the reader has to guess.
+
+**The win rate is compared to the breakeven implied by the realised payoff, not the
+one quoted at the time.** The quoted breakeven assumes winners pay the promised R:R.
+When they time-exit short of it, the requirement moves: a shortlist promising 3:1
+needs a 28% win rate, but the same shortlist whose winners close at +0.5R needs 55%.
+Comparing a realised rate to a promised threshold would pass a losing book, so the
+summary reports promised and realised payoff side by side and flags the divergence.
+`expectancy` — mean R per suggestion after costs — is also printed, because it is the
+one number here that assumes nothing about the shape of the payoff.
+
+Two conventions are shared with the backtester rather than reinvented, so the reviewer
+and `backtest/engine.py` cannot disagree about the same trades: a bar touching both
+levels resolves to the **stop**, and no exit is evaluated on the bar the idea was
+suggested on, because that bar closed before the decision existed.
+
+> **On synthetic data this measures the generator, not a market.** The generated window
+> ends years in the past, so suggestions made today have no bars after them and come
+> back `open` or `unscorable` — which is the honest answer, and the output says so. A
+> win rate computed against reproducible-from-a-seed bars would be a property of the
+> data builder. Run this against a live or CSV source that has actually accumulated
+> history since you started journaling.
+
+The fetcher refuses to score a suggestion when the bars it retrieves do not reproduce
+the journaled entry price (tolerance 0.5%, `--set`-able). That is not a hypothetical
+safeguard: re-requesting from a later start date returns a *different* series on the
+synthetic source, because the seed fixes the stream from the start date. Measured on
+BTC/USDT 4h, bar 400 of a 1200-bar fetch closes at 30,703.32 while a fresh 800-bar
+fetch beginning at bar 400's date closes at 41,475.43 — 35% apart at the same index.
+A reviewer that fetched naively would score every suggestion against prices that never
+existed and report a win rate measuring its own fetch.
 
 ### What it refuses to do
 
@@ -434,6 +493,7 @@ universe scanner  ->  signal engine  ->  backtester  ->  validation stack  ->  r
 | Screener | `screener/` | one implementation, shared by CLI and dashboard |
 | Fundamentals | `data/fundamentals.py`, `screener/fundamental.py` | valuation / quality / balance-sheet / dividend / analyst gates + the earnings blackout. **Gates, never weights** — see [The daily run](#the-daily-run) |
 | Daily | `screener/daily.py` | composes scan + rank + gates, carries the study verdict, appends a falsifiable journal |
+| Review | `screener/review.py` | scores that journal: replays each suggestion against the bars that followed, in R. Shares its fill conventions with `backtest/engine.py` |
 | Report | `report.py`, `study.py` | verdict, charts, markdown + JSON |
 | Dashboard | `dashboard/` | FastAPI + lightweight-charts v5.3.0 (vendored, no CDN) |
 
@@ -599,12 +659,12 @@ src/tvlab/         config, data/, indicators/, risk/, strategy/, backtest/,
                    dashboard/
 dashboard/static/  index.html + vendored lightweight-charts 5.3.0 (Apache-2.0, no CDN)
 scripts/           setup.sh (venv + deps + vendor), fetch-vendor.sh (rebuild vendor/)
-tests/             632 tests, 26 files - including lookahead positive controls
+tests/             710 tests, 29 files - including lookahead positive controls
 vendor/            18 reference repos, gitignored (632 MB); repos.txt + LOCK.json tracked
 output/            generated reports + output/daily/ journal, gitignored
 ```
 
-13,966 lines of source, 7,661 lines of tests.
+14,945 lines of source, 9,168 lines of tests.
 
 ---
 

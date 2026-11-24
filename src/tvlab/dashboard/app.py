@@ -12,8 +12,15 @@ Endpoints
 ``GET  /api/indicators``      SMC + trend overlay series for charting
 ``GET  /api/backtest``        run a backtest, return equity + trades + metrics
 ``GET  /api/scan``            live setup read-out for the whole universe
+``GET  /api/suggest``         cost-adjusted ranked ideas for one symbol
+``GET  /api/daily``           the daily briefing (scan + rank + fundamental gates)
+``GET  /api/review``          score the journal: what past shortlists actually did
 ``GET  /api/report``          the most recent study's report.json, if present
 ``POST /api/config``          change market/style/strategy/params for the session
+
+Only ``POST /api/config`` mutates anything. ``/api/daily`` can append to the journal
+but only when asked explicitly, and ``/api/review`` is read-only by construction - a
+GET that writes to the record it is measuring would be a surprise.
 """
 
 from __future__ import annotations
@@ -563,6 +570,99 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         payload["fundamentals_error"] = fund_error
         payload["journal_path"] = str(journal_path(REPO_ROOT / c.output.dir))
         payload["recent_runs"] = read_journal(REPO_ROOT / c.output.dir, limit=10)
+        return _json_safe(payload)
+
+    # ------------------------------------------------------------------ review
+    @app.get("/api/review")
+    def api_review(
+        horizon: int = Query(90, ge=1, le=2000,
+                             description="bars to give each idea before marking it "
+                                         "to market"),
+        days: Optional[int] = Query(None, ge=1,
+                                    description="review only the most recent N runs"),
+        timeframe: Optional[str] = Query(None,
+                                         description="replay every run at this "
+                                                     "timeframe instead of its own"),
+    ) -> Dict[str, Any]:
+        """Score the journal: what past daily shortlists actually did.
+
+        The same composition ``tvlab review`` runs, delegating to
+        :mod:`tvlab.screener.review` - and to the same ``store_fetcher`` - so the
+        browser and the terminal cannot report different outcomes for one journal
+        line. Price anchoring is the part most likely to drift between two
+        implementations, which is why there is only one.
+
+        Unlike ``/api/daily`` this endpoint never writes. Reading a journal is all it
+        does, so there is no ``journal=true`` flag and no risk of a polling dashboard
+        mutating the record it is supposed to be measuring.
+
+        The payload leads with ``coverage`` rather than ``win_rate``. A rate without
+        its denominator reads as a verdict, and the honest first fact about a review
+        is how much of the journal could actually be scored: ideas still running are
+        ``open`` and ideas that could not be priced are ``unscorable``, and neither
+        belongs in a win rate.
+
+        ``realised_breakeven`` and ``payoff_diverged`` travel with ``win_rate`` on
+        purpose. The breakeven quoted when a suggestion was made assumes winners pay
+        the promised R:R; when they time-exit short of it, the required win rate is
+        much higher, and comparing the realised rate to the promised one would pass a
+        losing book. ``expectancy_r`` is the number that needs no such assumption.
+        """
+        from ..screener import SCAN_BARS
+        from ..screener.review import review as score_journal, store_fetcher
+
+        c = state.cfg
+        out_dir = REPO_ROOT / c.output.dir
+        jp = journal_path(out_dir)
+
+        entries = list(reversed(read_journal(out_dir, limit=days or 10_000_000)))
+        if not entries:
+            # Not an error and not an empty table: the journal simply does not exist
+            # yet. A UI that rendered this as "0% win rate" would be reporting a
+            # verdict about a strategy that has never been asked for one.
+            return _json_safe({
+                "available": False,
+                "detail": f"no journal at {jp}",
+                "journal_path": str(jp),
+                "next_step": (f"run the daily briefing with journal=true, or "
+                              f"`tvlab daily --market {c.universe.market} "
+                              f"--style {c.style}`, then return once enough bars "
+                              f"have printed for the ideas to resolve"),
+                "as_of": pd.Timestamp.now(tz="UTC").date().isoformat(),
+                "provenance": c.data.source,
+                "horizon_bars": horizon,
+                "n_suggestions": 0,
+                "n_scored": 0,
+                "coverage": "no suggestions in the journal",
+                "rows": [],
+            })
+
+        for run in entries:
+            if timeframe:
+                run["timeframe"] = timeframe
+            elif not run.get("timeframe"):
+                run["timeframe"] = c.timeframe.execution
+
+        fetch_errors: List[str] = []
+        no_future: Dict[str, str] = {}
+        fetch = store_fetcher(DataStore(c), scan_bars=SCAN_BARS,
+                              errors=fetch_errors, no_future=no_future)
+
+        summary = score_journal(entries, fetch, horizon_bars=horizon,
+                                provenance=c.data.source,
+                                as_of=pd.Timestamp.now(tz="UTC").date().isoformat())
+
+        payload = summary.to_dict()
+        payload["available"] = True
+        payload["journal_path"] = str(jp)
+        payload["n_runs"] = len(entries)
+        payload["first_run"] = entries[0].get("as_of")
+        payload["last_run"] = entries[-1].get("as_of")
+        payload["fetch_errors"] = fetch_errors
+        payload["no_future"] = no_future
+        # Stated at the top level, not left for the client to infer from provenance:
+        # on synthetic data every rate here measures the generator.
+        payload["measures_generator_not_market"] = bool(c.data.source == "synthetic")
         return _json_safe(payload)
 
     # ------------------------------------------------------------------ report
