@@ -86,7 +86,7 @@ def _pyne_cli() -> str | None:
     ``shutil.which`` is not enough: under pytest the venv's bin directory is often
     not on PATH even though the interpreter running the tests came from it, so the
     console script sits right next to ``sys.executable`` and which() returns None.
-    Treating that as "PyneCore unavailable" silently skipped all 21 tests.
+    Treating that as "PyneCore unavailable" silently skipped all 32 tests.
     """
     found = shutil.which("pyne")
     if found:
@@ -135,6 +135,11 @@ def reference(tmp_path_factory) -> pd.DataFrame:
     # interactive prompt. Passing -w and PYNE_WORK_DIR makes it non-interactive.
     wd = work / "wd"
     wd.mkdir(exist_ok=True)
+    # PyneCore >=6 resolves the source CSV under <work>/data/ and writes the
+    # converted .ohlcv beside it; earlier versions read the path from the working
+    # directory. Satisfy both so a newer `pyne` does not silently skip the suite.
+    (wd / "data").mkdir(exist_ok=True)
+    shutil.copy2(csv, wd / "data" / csv.name)
     env = dict(os.environ)
     env["PYNE_WORK_DIR"] = str(wd)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
@@ -143,6 +148,25 @@ def reference(tmp_path_factory) -> pd.DataFrame:
                        capture_output=True, text=True, cwd=str(work), timeout=600,
                        env=env, stdin=subprocess.DEVNULL)
     ohlcv = work / "BTC_USDT_240.ohlcv"
+    if not ohlcv.exists():
+        alternative = wd / "data" / "BTC_USDT_240.ohlcv"
+        if alternative.exists():
+            ohlcv = alternative
+    if not ohlcv.exists():
+        # PyneCore 6.15 writes the converted file under the right stem but with
+        # three stray Unicode characters appended ("BTC_USDT_240.ohlcv..."); the
+        # content is valid, only the name is wrong. Take whatever it produced
+        # rather than skipping the whole cross-check on an upstream naming bug.
+        produced = sorted(work.glob("BTC_USDT_240.ohlcv*")) + \
+            sorted(wd.glob("data/BTC_USDT_240.ohlcv*"))
+        if produced:
+            ohlcv = produced[0]
+            if ohlcv.name != "BTC_USDT_240.ohlcv":
+                # The stray characters break the loader's extension sniffing, so
+                # hand it a cleanly named copy.
+                fixed = work / "BTC_USDT_240.ohlcv"
+                shutil.copy2(ohlcv, fixed)
+                ohlcv = fixed
     if not ohlcv.exists():
         pytest.skip(f"pyne data convert-from failed (rc={r.returncode}): "
                     f"{(r.stderr or r.stdout)[-400:]}")

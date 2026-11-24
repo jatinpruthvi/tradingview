@@ -4,7 +4,7 @@ This file exists because "we vendored 18 repos" is not the same as "we used 18
 repos". Each entry below states what was taken, where it lives in `src/tvlab/`,
 and — where nothing was taken — the specific reason.
 
-`vendor/` itself is gitignored (632 MB, 26,647 files). `vendor/repos.txt` and
+`vendor/` itself is gitignored (635 MB, 26,692 files). `vendor/repos.txt` and
 `vendor/LOCK.json` are tracked and pin SHA, branch, date, stars and license.
 Rebuild with `./scripts/fetch-vendor.sh`.
 
@@ -351,6 +351,25 @@ TradingView's Pine built-ins, which makes it the only available authority on wha
 built-ins over bars this repo generates, and `tests/test_pynecore_reference.py`
 compares them against `indicators/technical.py`. Install with
 `pip install -r requirements-optional.txt`; the tests skip without it.
+
+The dependency is pinned in `requirements-optional.txt` to `>=6.15,<7` - the
+range that was actually cross-validated - instead of the open-ended `>=0.1` it
+started with. That bound is not cosmetic. An unpinned install pulled 6.15 in
+silently and broke the harness in two ways, both of them real upstream bugs:
+
+1. **The source layout moved.** 6.x resolves the CSV passed to
+   `data convert-from` under `<work>/data/` rather than in the working
+   directory, so the fixture now writes it to both and accepts either.
+2. **The output filename is corrupted.** `convert-from` writes the converted
+   file as `BTC_USDT_240.ohlcv` followed by three stray Unicode characters. The
+   bytes inside are valid; only the name is wrong. The fixture globs for
+   whatever was produced and gives the runner a cleanly renamed copy, because
+   the stray characters defeat its extension sniffing.
+
+Neither is worked around by pinning an old release: the 6.x layout is handled
+and the naming bug is absorbed in the test, with the pin bounding the range so
+a later release cannot reintroduce the same silent failure. Re-run
+`python -m pytest tests/test_pynecore_reference.py -q` before widening it.
 
 What that comparison found is recorded in section 10.
 

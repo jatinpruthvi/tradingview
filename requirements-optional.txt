@@ -56,4 +56,16 @@ yfinance>=0.2.40
 # `pynecore` is only a stub that installs this one.
 #
 # Without it those tests skip rather than fail.
-pynesys-pynecore[cli]>=0.1
+# Pinned to the range that was actually cross-validated, not left open-ended.
+# An unbounded >=0.1 pulled 6.15 in silently and broke the harness, because the
+# 6.x runner changed two things this test relies on:
+#   1. it resolves the source CSV under <work>/data/ instead of the working
+#      directory (handled by writing to both);
+#   2. `data convert-from` appends three stray Unicode characters to the output
+#      filename - "BTC_USDT_240.ohlcv" plus 3 chars. The bytes inside are valid,
+#      only the name is wrong, so tests/test_pynecore_reference.py detects the
+#      glob and loads a cleanly renamed copy. Upstream bug: do not assume it is
+#      fixed in the next patch release.
+# Re-run before widening the range:
+#   python -m pytest tests/test_pynecore_reference.py -q
+pynesys-pynecore[cli]>=6.15,<7
