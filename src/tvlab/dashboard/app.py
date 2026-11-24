@@ -578,6 +578,10 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         horizon: int = Query(90, ge=1, le=2000,
                              description="bars to give each idea before marking it "
                                          "to market"),
+        entry_tolerance: float = Query(0.005, ge=0.0, le=0.5,
+                                       description="how far the fetched bars may miss "
+                                                   "the journaled entry price before "
+                                                   "the idea is unscorable"),
         days: Optional[int] = Query(None, ge=1,
                                     description="review only the most recent N runs"),
         timeframe: Optional[str] = Query(None,
@@ -650,6 +654,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
         summary = score_journal(entries, fetch, horizon_bars=horizon,
                                 provenance=c.data.source,
+                                entry_tolerance=entry_tolerance,
                                 as_of=pd.Timestamp.now(tz="UTC").date().isoformat())
 
         payload = summary.to_dict()

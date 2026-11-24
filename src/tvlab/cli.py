@@ -722,6 +722,10 @@ def _mcap(v: Optional[float], symbol: str) -> str:
               help="replay every run at this timeframe instead of the one it recorded")
 @click.option("--horizon", type=int, default=90, show_default=True,
               help="bars to give each idea before marking it to market")
+@click.option("--entry-tolerance", type=float, default=0.005, show_default=True,
+              metavar="FRACTION",
+              help="how far the fetched bars may miss the journaled entry price "
+                   "before the idea is unscorable rather than scored")
 @click.option("--days", type=int, default=None,
               help="review only the most recent N journal runs")
 @click.option("--top", type=int, default=40, show_default=True,
@@ -729,7 +733,7 @@ def _mcap(v: Optional[float], symbol: str) -> str:
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="emit the summary as JSON instead of a table")
 def review_journal(market, style, config, set_pairs, data_source, timeframe,
-                   horizon, days, top, as_json) -> None:
+                   horizon, entry_tolerance, days, top, as_json) -> None:
     """Score the journal: what the daily shortlists actually did.
 
     ``tvlab daily`` appends every shortlist to ``output/daily/journal.jsonl``. This
@@ -787,6 +791,10 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
     cfg = _cfg(market, style, config, set_pairs, data_source)
     out_dir = REPO_ROOT / cfg.output.dir
     jp = journal_path(out_dir)
+    # `cfg.style` is None unless a style was named, and printing a suggested command
+    # containing "--style None" hands the user something they cannot paste. Same
+    # convention as `daily.py` and the other commands.
+    style_name = cfg.style or style or "default"
 
     entries = list(reversed(read_journal(out_dir, limit=days or 10_000_000)))
     if not entries:
@@ -794,7 +802,7 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
         console.print(f"  [dim]no journal at {jp}[/dim]")
         console.print("\n  Run the daily briefing first - it is what writes the journal:")
         console.print(f"    [dim]tvlab daily --market {cfg.universe.market} "
-                      f"--style {cfg.style}[/dim]")
+                      f"--style {style_name}[/dim]")
         console.print("  [dim]Then come back after enough bars have printed for the ideas "
                       "to have resolved. A review run the same morning it was suggested "
                       "has nothing to say.[/dim]")
@@ -821,6 +829,7 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
 
     summary = score_journal(entries, fetch, horizon_bars=horizon,
                             provenance=cfg.data.source,
+                            entry_tolerance=entry_tolerance,
                             as_of=datetime.now(timezone.utc).date().isoformat())
 
     if as_json:
@@ -829,10 +838,11 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
 
     n_runs = len(entries)
     console.print(f"\n[bold]Journal review[/bold] - {summary.as_of}  "
-                  f"[dim]{cfg.universe.market} / {cfg.style} / source "
+                  f"[dim]{cfg.universe.market} / {style_name} / source "
                   f"{cfg.data.source}[/dim]")
     console.print(f"  {n_runs} run(s) since {entries[0].get('as_of')}  ·  "
-                  f"{summary.n_suggestions} suggestion(s)  ·  horizon {horizon} bars")
+                  f"{summary.n_suggestions} suggestion(s)  ·  horizon {horizon} bars  ·  "
+                  f"entry tolerance {entry_tolerance * 100:.2f}%")
     console.print(f"  [bold]{summary.coverage}[/bold]")
 
     if cfg.data.source == "synthetic":

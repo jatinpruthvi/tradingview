@@ -542,7 +542,7 @@ licence means all rights reserved, not public domain. Educational reference only
 | Fill conventions shared with the backtester rather than reinvented (pessimistic intrabar tie, no exit on the entry bar) | `src/tvlab/screener/review.py`, matching `src/tvlab/backtest/engine.py` |
 | Entry-drift guard: a fetch that does not reproduce the journaled entry price is refused, not scored | `src/tvlab/screener/review.py` |
 | `OUTCOMES` / `SCORED_OUTCOMES` pinned, so a sixth state lands on the refusal side by default | `src/tvlab/screener/review.py` |
-| 78 more tests | `tests/test_review.py` (44), `tests/test_cli_review.py` (19), `tests/test_dashboard_review.py` (15) |
+| 81 more tests | `tests/test_review.py` (44), `tests/test_cli_review.py` (22), `tests/test_dashboard_review.py` (15) |
 | Two brittle JS-boundary fixtures made order-independent | `tests/test_dashboard_daily.py`, `tests/test_dashboard_review.py` |
 
 **Still open, in rough order of value:**

@@ -166,6 +166,9 @@ class ReviewSummary:
     #: the module stays deterministic and testable.
     as_of: Optional[str] = None
     horizon_bars: int = 0
+    #: the entry-drift tolerance the scoring used. Recorded for the same reason the
+    #: horizon is: both change what the numbers mean, so neither may be implied.
+    entry_tolerance: Optional[float] = None
     n_suggestions: int = 0
     n_scored: int = 0
     n_open: int = 0
@@ -421,7 +424,8 @@ def review(
             rows.append(score_one(row, cache[key], horizon_bars,
                                   entry_tolerance=entry_tolerance))
 
-    return summarise(rows, n_suggestions, horizon_bars, provenance, as_of=as_of)
+    return summarise(rows, n_suggestions, horizon_bars, provenance, as_of=as_of,
+                     entry_tolerance=entry_tolerance)
 
 
 def _rr_of(r: ScoredSuggestion) -> Optional[float]:
@@ -443,7 +447,8 @@ def _rr_of(r: ScoredSuggestion) -> Optional[float]:
 
 def summarise(rows: Sequence[ScoredSuggestion], n_suggestions: int,
               horizon_bars: int, provenance: Optional[str] = None,
-              as_of: Optional[str] = None) -> ReviewSummary:
+              as_of: Optional[str] = None,
+              entry_tolerance: Optional[float] = None) -> ReviewSummary:
     """Aggregate scored rows. Split out from :func:`review` so it can be tested
     without a price source at all."""
     scored = [r for r in rows if r.scored]
@@ -508,6 +513,7 @@ def summarise(rows: Sequence[ScoredSuggestion], n_suggestions: int,
     return ReviewSummary(
         as_of=as_of,
         horizon_bars=int(horizon_bars),
+        entry_tolerance=entry_tolerance,
         n_suggestions=int(n_suggestions),
         n_scored=len(scored),
         n_open=len(open_),

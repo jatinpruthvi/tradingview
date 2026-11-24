@@ -343,6 +343,69 @@ def test_a_drifting_entry_price_is_refused(runner, isolated_output, patch_ohlcv)
     assert d["n_scored"] == 0
 
 
+def test_the_entry_tolerance_flag_actually_reaches_the_scorer(runner, isolated_output,
+                                                              patch_ohlcv):
+    """The README documents this flag, so it has to change behaviour - a documented
+    option that is parsed and dropped is the same class of unbacked claim as the
+    scoring promise this whole feature exists to retire.
+
+    A 2% drift is refused at the 0.5% default and accepted at 5%.
+    """
+    bars = _series([(101.0, 99.5, 100.0), (106.5, 100.0, 106.0)])
+    _write_journal(isolated_output, [_run("2026-01-01", [_sugg("AAA", last=102.0)])])
+    patch_ohlcv({"AAA": bars})
+
+    strict = runner.invoke(cli, ["review", "--horizon", "1", "--json"])
+    d_strict = json.loads(strict.output[strict.output.index("{"):])
+    assert d_strict["rows"][0]["outcome"] == "unscorable"
+    # drift is relative to the journaled entry, so |100 - 102| / 102, not / 100
+    assert d_strict["rows"][0]["entry_drift"] == pytest.approx(2 / 102)
+    assert d_strict["entry_tolerance"] == pytest.approx(0.005)
+
+    loose = runner.invoke(cli, ["review", "--horizon", "1", "--json",
+                                "--entry-tolerance", "0.05"])
+    d_loose = json.loads(loose.output[loose.output.index("{"):])
+    assert d_loose["rows"][0]["outcome"] == "take_profit", \
+        "widening the tolerance did not change the outcome; the flag is not wired"
+    assert d_loose["n_scored"] == 1
+    assert d_loose["entry_tolerance"] == pytest.approx(0.05)
+
+
+def test_the_tolerance_used_is_printed_in_the_header(runner, isolated_output, patch_ohlcv):
+    """Two reviews of one journal can disagree, and the tolerance is one reason why.
+    It has to be on screen next to the horizon."""
+    bars = _series([(101.0, 99.5, 100.0), (106.5, 100.0, 106.0)])
+    _write_journal(isolated_output, [_run("2026-01-01", [_sugg("AAA")])])
+    patch_ohlcv({"AAA": bars})
+    res = runner.invoke(cli, ["review", "--horizon", "1", "--entry-tolerance", "0.02"])
+    out = _flat(res.output)
+    assert "entry tolerance 2.00%" in out
+    assert "horizon 1 bars" in out
+
+
+def test_set_cannot_reach_the_tolerance_and_the_docs_say_so(runner, isolated_output,
+                                                            patch_ohlcv):
+    """`--set` only reaches fields in the config schema, and an unknown path is a
+    silent no-op rather than an error. That is why the tolerance is a flag: an earlier
+    draft of the README claimed it was `--set`-able, which would have been a plausible
+    instruction that did nothing."""
+    bars = _series([(101.0, 99.5, 100.0), (106.5, 100.0, 106.0)])
+    _write_journal(isolated_output, [_run("2026-01-01", [_sugg("AAA", last=102.0)])])
+    patch_ohlcv({"AAA": bars})
+
+    res = runner.invoke(cli, ["review", "--horizon", "1", "--json",
+                              "--set", "review.entry_tolerance=0.5"])
+    assert res.exit_code == 0, res.output          # no error - it is silently ignored
+    d = json.loads(res.output[res.output.index("{"):])
+    assert d["entry_tolerance"] == pytest.approx(0.005), "--set changed the tolerance"
+    assert d["rows"][0]["outcome"] == "unscorable", "--set appeared to take effect"
+
+    readme = (REPO_ROOT / "README.md").read_text()
+    assert "--entry-tolerance" in readme, "the README must name the flag that exists"
+    assert "silent no-op" in readme, \
+        "the README should warn that --set cannot reach this"
+
+
 # ---------------------------------------------------------------------- prose
 
 

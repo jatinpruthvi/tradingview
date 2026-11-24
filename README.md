@@ -115,7 +115,7 @@ tvlab scan     --market crypto --style swing          # who is in a setup right 
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 710 tests
+pytest                                                # 713 tests
 ```
 
 `tvlab daily` is the one to schedule. It composes the other three stages and writes
@@ -327,13 +327,24 @@ suggested on, because that bar closed before the decision existed.
 > history since you started journaling.
 
 The fetcher refuses to score a suggestion when the bars it retrieves do not reproduce
-the journaled entry price (tolerance 0.5%, `--set`-able). That is not a hypothetical
+the journaled entry price — `--entry-tolerance 0.005` by default, i.e. 0.5%, and
+`?entry_tolerance=` on the API. That is not a hypothetical
 safeguard: re-requesting from a later start date returns a *different* series on the
 synthetic source, because the seed fixes the stream from the start date. Measured on
 BTC/USDT 4h, bar 400 of a 1200-bar fetch closes at 30,703.32 while a fresh 800-bar
 fetch beginning at bar 400's date closes at 41,475.43 — 35% apart at the same index.
 A reviewer that fetched naively would score every suggestion against prices that never
 existed and report a win rate measuring its own fetch.
+
+The default is deliberately tight but not exact. Some sources revise historical closes
+when a split or dividend is applied, and a bar-boundary difference can shift which bar
+a date resolves to; refusing to score those would make the reviewer useless for
+exactly the journals that matter. Widen it only when you know why the prices differ —
+the drift is printed per row, so a widened tolerance is visible rather than silent.
+
+> This is an explicit option, not a config field. `--set review.entry_tolerance=…`
+> looks plausible and does nothing at all: `--set` only reaches fields that exist in
+> the config schema, and an unknown path is a silent no-op rather than an error.
 
 ### What it refuses to do
 
@@ -659,12 +670,12 @@ src/tvlab/         config, data/, indicators/, risk/, strategy/, backtest/,
                    dashboard/
 dashboard/static/  index.html + vendored lightweight-charts 5.3.0 (Apache-2.0, no CDN)
 scripts/           setup.sh (venv + deps + vendor), fetch-vendor.sh (rebuild vendor/)
-tests/             710 tests, 29 files - including lookahead positive controls
+tests/             713 tests, 29 files - including lookahead positive controls
 vendor/            18 reference repos, gitignored (632 MB); repos.txt + LOCK.json tracked
 output/            generated reports + output/daily/ journal, gitignored
 ```
 
-14,945 lines of source, 9,168 lines of tests.
+14,966 lines of source, 9,231 lines of tests.
 
 ---
 
