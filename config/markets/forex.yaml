@@ -1,0 +1,26 @@
+# forex market profile
+#
+# max_leverage kept at 1.0 even though brokers offer 50-500x: leverage multiplies the drawdown, not the edge. fee_bps is the spread-commission equivalent; overnight swap is NOT modelled.
+#
+# Layered on top of config/default.yaml, then config/styles/<style>.yaml.
+universe:
+  market: forex
+  exchange: FX_IDC
+  quote_currency: USD
+  symbols:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+  - XAUUSD
+  min_quote_volume: 0
+  max_symbols: 8
+risk:
+  correlation_threshold: 0.4   # majors are genuinely diversifying; a lower bar still catches EUR/GBP
+  allow_short: true
+  max_leverage: 1.0
+costs:
+  fee_bps: 1.0
+  slippage_bps: 1.5

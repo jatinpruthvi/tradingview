@@ -1,0 +1,76 @@
+# ============================================================
+# tvlab default configuration - CONSERVATIVE risk profile
+# Every value here is overridden by config/markets/*.yaml and
+# config/styles/*.yaml, then by --set key.path=value on the CLI.
+# ============================================================
+
+risk:
+  risk_per_trade: 0.005        # 0.5% of equity at risk per trade
+  max_position_pct: 0.25       # never put more than 25% of equity in one name
+  max_drawdown_pct: 0.10       # HARD STOP: halt all trading at 10% equity DD
+  daily_loss_limit_pct: 0.02   # no new entries after -2% on the day
+  max_open_positions: 5
+  max_correlated_positions: 2
+  correlation_threshold: 0.60  # at/above this, two symbols count as one bet
+  max_leverage: 1.0
+  allow_short: true
+  dd_throttle_start: 0.5       # start scaling size down at 5% DD (halfway to limit)
+  min_stop_distance_pct: 0.0015
+  max_stop_distance_pct: 0.25
+
+costs:
+  fee_bps: 5.0                 # 0.05% per side
+  slippage_bps: 2.0            # 0.02% adverse per side
+  min_commission: 0.0
+
+universe:
+  market: crypto
+  exchange: binance
+  quote_currency: USDT
+  min_quote_volume: 1000000
+  max_symbols: 20
+  symbols: []
+
+timeframe:
+  execution: 4h
+  bias: 1d
+  entry: null
+
+strategy:
+  name: smc_trend
+  params: {}
+
+backtest:
+  initial_capital: 100000
+  intrabar_fill: pessimistic   # if a bar touches both SL and TP, assume SL first
+  entry_on_next_open: true     # signals act on the NEXT bar's open (no lookahead)
+  max_bars_in_trade: null
+  seed: 42
+
+walk_forward:
+  enabled: true
+  n_splits: 5
+  train_pct: 0.6
+  rolling: true
+  min_train_bars: 500
+  min_test_bars: 150
+  objective: deflated_sharpe
+  max_trials: 64
+
+monte_carlo:
+  enabled: true
+  n_sims: 2000
+  confidence: 0.95
+  block_size: 20
+  seed: 7
+
+data:
+  source: synthetic
+  cache_dir: data/cache
+  synthetic_bars: 4000
+  synthetic_seed: 20261123
+
+output:
+  dir: output
+  plots: true
+  dpi: 130

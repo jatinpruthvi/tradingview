@@ -1,0 +1,50 @@
+# --- vendored upstream repos: 632 MB / 26k files, rebuilt by scripts/fetch-vendor.sh ---
+# (vendor/repos.txt and vendor/LOCK.json ARE tracked: they pin what to fetch)
+vendor/*
+!vendor/repos.txt
+!vendor/LOCK.json
+!vendor/README.md
+
+# --- generated artefacts ---
+output/
+data/cache/
+*.csv.gz
+!tests/fixtures/*.csv
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- node ---
+node_modules/
+
+# --- secrets: NEVER commit exchange/broker credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+secrets.yaml
+
+# --- editor / os ---
+.DS_Store
+.idea/
+.vscode/
+.eggs/
+/tmp/
+
+# --- PyneCore cross-validation artifacts ---
+# `pyne` creates a working directory and the reference runner writes its plot CSV
+# and generated syminfo next to the script. Only the script itself is source.
+workdir/
+scripts/vendor_xval_indicator.csv
+scripts/vendor_xval_indicator.toml
+*.ohlcv
+# Fetched/exported bars. `data/live` is the default data.csv_root, so this is where
+# `tvlab data --export` puts live bars - large, machine-specific and reproducible.
+data/live/

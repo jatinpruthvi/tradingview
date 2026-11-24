@@ -1,0 +1,25 @@
+# STYLE: hft
+#
+# Order-book / microstructure. WARNING: this codebase backtests OHLCV bars only. Sub-second edge requires L2 data, colocation and a real latency model - see vendor/visualhft for that toolchain. This profile is a stub so the CLI does not silently pretend to support it.
+timeframe:
+  execution: 1m
+  bias: 15m
+  entry: null
+strategy:
+  name: ema_pullback
+  params:
+    fast: 9
+    slow: 21
+    atr_period: 14
+    atr_stop_mult: 1.0
+    r_multiple: 1.5
+    max_bars_in_trade: 12
+risk:
+  max_open_positions: 2
+  daily_loss_limit_pct: 0.01
+  min_stop_distance_pct: 0.0005
+backtest:
+  max_bars_in_trade: 12
+  intrabar_fill: pessimistic
+walk_forward:
+  enabled: false

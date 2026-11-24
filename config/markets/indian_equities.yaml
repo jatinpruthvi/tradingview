@@ -1,0 +1,96 @@
+# indian_equities market profile
+#
+# NSE cash segment: allow_short is false because intraday shorting requires the F&O segment. fee_bps approximates brokerage + STT + exchange txn + GST. Session 09:15-15:30 IST; daily bars only unless you have a tick vendor.
+#
+# Layered on top of config/default.yaml, then config/styles/<style>.yaml.
+universe:
+  market: indian_equities
+  exchange: NSE
+  quote_currency: INR
+  symbols:
+  - RELIANCE.NS
+  - TCS.NS
+  - HDFCBANK.NS
+  - INFY.NS
+  - ICICIBANK.NS
+  - SBIN.NS
+  - ITC.NS
+  - BHARTIARTL.NS
+  - KOTAKBANK.NS
+  - LT.NS
+  - TATAMOTORS.NS
+  - BAJFINANCE.NS
+  min_quote_volume: 1000000
+  max_symbols: 12
+  nse_index: NIFTY 500   # --data-source nse pulls this index's members in one call;
+                         # the 12 symbols above are the offline/synthetic fallback
+risk:
+  correlation_threshold: 0.65   # large caps vs Nifty
+  allow_short: false
+  max_leverage: 1.0
+costs:
+  fee_bps: 3.0
+  slippage_bps: 5.0
+# ---------------------------------------------------------------------------
+# Fundamentals: gates applied ON TOP of the cost-aware technical ranking.
+#
+# These veto; they do not rank. Nothing here is weighted into a composite score,
+# because a weighted blend of P/E, ROE and growth has no arithmetic derivation -
+# any weights would be invented, and fitting them on the ~31 trades this repo can
+# measure is noise mining. See src/tvlab/screener/fundamental.py.
+#
+# NOT BACKTESTED. There is no walk-forward evidence that any threshold below
+# improves expectancy, and none is claimed. What follows is risk control, not
+# alpha: the settings that are ON are the ones whose value does not depend on
+# believing a valuation model.
+#
+# Missing data is a third outcome. A symbol whose P/E did not arrive is neither
+# approved nor rejected - it is "unrated", with the field named. Passing it would
+# let an unfiltered name into the shortlist; rejecting it would turn an endpoint
+# gap into a market verdict.
+#
+# Needs network access to scanner.tradingview.com (via tvscreener). Offline, the
+# technical ranking still runs and every name is flagged as NOT fundamentally
+# screened.
+fundamentals:
+  enabled: true
+
+  # --- the gate that matters most -----------------------------------------
+  # A swing position held through an earnings release is an unhedgeable gap: the
+  # stop does not protect against it, because the position opens at the new price.
+  # This needs nothing but a date and makes no statistical claim. When the date is
+  # unknown the symbol is unrated, not waved through.
+  earnings_blackout_days: 2
+  # Post-print drift often runs several sessions; 0 = do not gate on it.
+  earnings_aftermath_days: 0
+
+  # --- scale, so the name is actually tradeable ---------------------------
+  # INR, not USD: 5.0e10 is ~USD 6bn. The scanner reports market cap in the
+  # listing currency, so this threshold is per-market by construction.
+  min_market_cap: 5.0e10
+
+  # --- solvency and liquidity: risk gates, not valuation views ------------
+  require_positive_free_cash_flow: true
+  max_debt_to_equity: 2.0      # 200% - consistent with the no-leverage mandate
+  min_current_ratio: 1.0
+
+  # --- deliberately NOT set -----------------------------------------------
+  # Each of these is a valuation or alpha claim. They are left null because the
+  # honest position is that this repo has no evidence for a threshold, and a
+  # number here would look rigorous while being arbitrary. Set them per run with
+  # --set if you have a view you can defend, e.g.
+  #   tvlab daily --set fundamentals.max_pe_ttm=25 --set fundamentals.min_roe=0.15
+  max_pe_ttm: null
+  max_price_to_book: null
+  max_price_to_sales: null
+  max_ev_to_ebitda: null
+  min_roe: null
+  min_operating_margin: null
+  min_net_margin: null
+  min_revenue_growth_yoy: null
+  min_eps_growth_yoy: null
+  min_dividend_yield: null
+  max_dividend_payout: null
+  # TradingView's analyst mark, 0 (strong sell) .. 5 (strong buy). Not a gate by
+  # default: consensus is a crowded signal and following it is not risk control.
+  min_analyst_rating: null
