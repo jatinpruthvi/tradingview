@@ -146,6 +146,19 @@ def test_suggest_reports_position_size_from_the_mandate(runner, patch_scan):
 # ------------------------------------------------------------------ empty path
 
 
+def test_suggest_drops_shorts_when_the_market_is_long_only(runner, patch_scan):
+    """Indian cash equities are long-only (`allow_short: false`), so a short must not
+    be ranked, shown, or called the best idea - and the drop must be stated."""
+    patch_scan([_row("SHORT", signal=-1, last=100.0, stop=102.0, target=96.0)])
+    res = runner.invoke(cli, ["suggest", "--market", "indian_equities", "--style", "swing"])
+    assert res.exit_code == 0, res.output
+    out = _flat(res.output)
+    assert "SHORT" not in out
+    assert "Nothing qualifies" in out
+    assert "1 short(s) dropped" in out
+    assert "allow_short is false" in out
+
+
 def test_suggest_says_plainly_when_nothing_qualifies(runner, patch_scan):
     """The normal state. It must read as an answer, not as a crash or an empty table."""
     patch_scan([_row("QUIET", signal=0)])

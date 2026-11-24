@@ -185,6 +185,30 @@ def test_forex_costs_change_the_verdict_for_the_same_idea():
 # ------------------------------------------------------------------ evaluation
 
 
+def test_shorts_are_dropped_at_ranking_time_in_a_long_only_market():
+    """`allow_short` gates the ranking, not just the position sizer.
+
+    A short ranked first in a market where the sizer refuses shorts is the worst
+    shape of answer: it reads as the best idea and then cannot be taken. It must be
+    dropped before ranking, counted, and not misfiled as a cost rejection.
+    """
+    rows = [
+        _row("LONG", last=100.0, stop=98.0, target=104.0),
+        _row("SHORT", signal=-1, last=100.0, stop=102.0, target=96.0),
+    ]
+
+    long_only = suggest(rows, CRYPTO_FEE, CRYPTO_SLIP, allow_short=False)
+    assert [c.symbol for c in long_only["candidates"]] == ["LONG"]
+    assert long_only["shorts_skipped"] == ["SHORT"]
+    assert long_only["n_shorts_skipped"] == 1
+    assert long_only["n_rejected"] == 0, "a rule, not a cost verdict"
+    assert long_only["unscoreable"] == []
+
+    both = suggest(rows, CRYPTO_FEE, CRYPTO_SLIP)
+    assert {c.symbol for c in both["candidates"]} == {"LONG", "SHORT"}
+    assert both["n_shorts_skipped"] == 0
+
+
 def test_evaluate_skips_rows_with_no_signal():
     assert evaluate(_row("X", signal=0), CRYPTO_FEE, CRYPTO_SLIP) is None
 

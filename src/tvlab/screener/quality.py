@@ -355,6 +355,7 @@ def suggest(
     min_stop_distance_pct: float = 0.0015,
     max_breakeven: float = 0.60,
     min_bars: int = 100,
+    allow_short: bool = True,
 ) -> Dict[str, Any]:
     """Rank a scanned universe into an ordered shortlist with reasoning.
 
@@ -366,12 +367,23 @@ def suggest(
     than this to break even is reported as rejected, not ranked below the others.
     Presenting it as merely "lower quality" would imply it is a worse version of
     a good idea, when in fact it is untradeable at these costs.
+
+    ``allow_short`` is applied here, at ranking time, rather than left to the
+    position sizer. The sizer refuses a short in a long-only market, so a short
+    ranked first would be the worst possible answer: it reads as the best idea and
+    then cannot be taken. Rows dropped this way are counted in ``shorts_skipped``,
+    because an empty shortlist with no stated reason is the same failure in a
+    different place.
     """
     candidates: List[Candidate] = []
     unscoreable: List[str] = []
     rejected: List[Dict[str, Any]] = []
+    shorts_skipped: List[str] = []
 
     for row in rows:
+        if not allow_short and getattr(row, "signal", 0) < 0:
+            shorts_skipped.append(row.symbol)
+            continue
         c = evaluate(row, fee_bps, slippage_bps, min_stop_distance_pct)
         if c is None:
             if getattr(row, "signal", 0) != 0:
@@ -400,6 +412,8 @@ def suggest(
         "candidates": candidates,
         "rejected": rejected,
         "unscoreable": unscoreable,
+        "shorts_skipped": shorts_skipped,
+        "n_shorts_skipped": len(shorts_skipped),
         "n_candidates": len(candidates),
         "n_rejected": len(rejected),
         "max_breakeven": max_breakeven,

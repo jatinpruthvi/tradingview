@@ -464,7 +464,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                                      with_trendlines=trendlines)
         res = build_suggestions(rows, fee_bps=c.costs.fee_bps, slippage_bps=c.costs.slippage_bps,
                                 min_stop_distance_pct=c.risk.min_stop_distance_pct,
-                                max_breakeven=max_breakeven)
+                                max_breakeven=max_breakeven,
+                                allow_short=c.risk.allow_short)
 
         measured = None
         try:
@@ -478,6 +479,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             "candidates": [x.to_dict() for x in res["candidates"]],
             "rejected": res["rejected"],
             "unscoreable": res["unscoreable"],
+            "shorts_skipped": res["shorts_skipped"],
+            "n_shorts_skipped": res["n_shorts_skipped"],
             "n_candidates": res["n_candidates"],
             "n_rejected": res["n_rejected"],
             "round_trip_cost_bps": res["round_trip_cost_bps"],

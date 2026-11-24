@@ -287,14 +287,17 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
 
     res = build_suggestions(rows, fee_bps=cfg.costs.fee_bps, slippage_bps=cfg.costs.slippage_bps,
                             min_stop_distance_pct=cfg.risk.min_stop_distance_pct,
-                            max_breakeven=max_breakeven)
+                            max_breakeven=max_breakeven,
+                            allow_short=cfg.risk.allow_short)
 
     rt = res["round_trip_cost_bps"]
     console.print(f"\n[bold]Suggestions[/bold] - {cfg.strategy.name} on {tf} "
                   f"({cfg.universe.market}/{cfg.style or style or 'default'})")
     console.print(f"  round-trip cost {rt:.1f} bp  ·  scanned {len(rows)} symbols  ·  "
                   f"{res['n_candidates']} candidate(s), {res['n_rejected']} rejected  ·  "
-                  f"max breakeven {max_breakeven * 100:.0f}%")
+                  f"max breakeven {max_breakeven * 100:.0f}%"
+                  + (f"  ·  {res['n_shorts_skipped']} short(s) dropped "
+                     f"(allow_short=false)" if res["n_shorts_skipped"] else ""))
 
     measured = _measured_win_rate(cfg, strat.name)
     status = (measured or {}).get("status")
@@ -389,6 +392,10 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
         console.print("\n[bold yellow]Nothing qualifies.[/bold yellow]")
         console.print(f"  {why['live']} live signal(s) of {why['scanned']} scanned; "
                       f"{res['n_rejected']} rejected by the cost/breakeven gate.")
+        if res["n_shorts_skipped"]:
+            console.print(f"  [yellow]{res['n_shorts_skipped']} of those were short and "
+                          f"were dropped before ranking: risk.allow_short is false "
+                          f"for this market[/yellow]")
         for rej in res["rejected"][:top]:
             console.print(f"    [dim]{rej['symbol']:<12} {rej['side']:<5} R:R {rej['rr']:.2f}"
                           f"  - {'; '.join(rej['reasons'])}[/dim]")
@@ -527,7 +534,7 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
     from .data.store import DataStore
     from .pipeline import build_strategy
     from .screener import SCAN_BARS, scan_universe
-    from .screener.daily import append_journal, build_briefing
+    from .screener.daily import NOTE_NO_GATE, append_journal, build_briefing
 
     cfg = _cfg(market, style, config, set_pairs, data_source)
     tf = timeframe or cfg.timeframe.execution
@@ -573,7 +580,9 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
     console.print(f"  scanned {b.symbols_scanned} symbol(s)  ·  {b.signals_found} live "
                   f"signal(s)  ·  {len(b.rows)} on the shortlist  ·  "
                   f"{len(b.rejected_technical)} rejected on cost  ·  "
-                  f"{len(b.rejected_fundamental)} rejected or unrated on fundamentals")
+                  f"{len(b.rejected_fundamental)} rejected or unrated on fundamentals"
+                  + (f"  ·  {len(b.shorts_skipped)} short(s) dropped "
+                     f"(allow_short=false)" if b.shorts_skipped else ""))
     if b.data_errors:
         console.print(f"  [yellow]{len(b.data_errors)} symbol(s) failed to load - the "
                       f"shortlist covers the rest[/yellow]")
@@ -582,8 +591,28 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
     if want_fundamentals and snaps is not None:
         cov = b.fundamental_coverage or {}
         mf = cov.get("missing_fields") or {}
-        console.print(f"  fundamentals: {cov.get('symbols', 0)} symbol(s) returned, "
-                      f"{cov.get('complete', 0)} complete, {cov.get('partial', 0)} partial")
+        got = cov.get("symbols", 0)
+        asked = cov.get("requested")
+        # Both parts of this line are absent unless they are true: "gated" only exists
+        # when a gate ran, so a configuration with no thresholds set cannot report 0
+        # gated candidates and blame the technical side for it.
+        gated = cov.get("gated")
+        # "returned" used to be counted over the gated candidates, so a quiet day - no
+        # setup, nothing to gate - printed "0 symbol(s) returned" over a full set of
+        # snapshots. Say how many of how many arrived, then how many reached a gate.
+        fetched = (f"{got} of {asked}" if asked else f"{got}") + " symbol(s) fetched"
+        console.print(f"  fundamentals: {fetched}, "
+                      f"{cov.get('complete', 0)} complete, {cov.get('partial', 0)} partial"
+                      + (f"  ·  {gated} gated" if gated is not None else ""))
+        if got and gated == 0:
+            console.print("  [dim]no candidate reached the gates: no setup survived the "
+                          "technical and cost tests, so this is fetch coverage, "
+                          "not a fundamental verdict[/dim]")
+        elif gated is None and NOTE_NO_GATE in b.notes:
+            # No count and no gate sentence on this line would leave it ambiguous -
+            # "why is there no gating here?" - so the journal's own explanation is
+            # printed next to it rather than only being findable in the JSON.
+            console.print(f"  [dim]{NOTE_NO_GATE}[/dim]")
         if mf:
             worst = ", ".join(f"{k} ({v})" for k, v in list(mf.items())[:4])
             console.print(f"  [dim]fields the endpoint did not report: {worst}"

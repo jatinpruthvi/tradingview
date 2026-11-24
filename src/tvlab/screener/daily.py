@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..config import AppConfig
-from ..data.fundamentals import FundamentalSnapshot
+from ..data.fundamentals import FundamentalSnapshot, coverage
 from . import fundamental as fgates
 from .quality import Candidate, suggest
 
@@ -61,6 +61,13 @@ _VERDICT_PASS = frozenset({"PASSES ON THIS DATA"})
 _VERDICT_FAIL = frozenset({"NOT VALIDATED", "PARTIAL"})
 #: Anything outside both sets is unrecognised and must not be read as either.
 KNOWN_VERDICTS = _VERDICT_PASS | _VERDICT_FAIL
+
+#: The note recorded when ``fundamentals.enabled`` is true but every threshold is
+#: null, so no gate runs. A constant rather than a literal twice: the CLI prints it
+#: beside the coverage line, and a message that can drift between the journal and
+#: the terminal would be two different explanations of the same run.
+NOTE_NO_GATE = ("fundamentals.enabled is true but no threshold is set, "
+                "so no fundamental gate ran")
 
 
 @dataclass
@@ -144,6 +151,8 @@ class DailyBriefing:
 
     symbols_scanned: int = 0
     signals_found: int = 0
+    #: symbols whose only setup was short, in a market where shorts cannot be taken
+    shorts_skipped: List[str] = field(default_factory=list)
     fundamentals_enabled: bool = False
     fundamentals_requested: bool = False
     fundamental_coverage: Dict[str, Any] = field(default_factory=dict)
@@ -214,6 +223,8 @@ class DailyBriefing:
             "is_validated": self.is_validated,
             "symbols_scanned": self.symbols_scanned,
             "signals_found": self.signals_found,
+            "shorts_skipped": list(self.shorts_skipped),
+            "n_shorts_skipped": len(self.shorts_skipped),
             "n_shortlist": len(self.rows),
             "n_rejected_technical": len(self.rejected_technical),
             "n_rejected_fundamental": len(self.rejected_fundamental),
@@ -260,7 +271,8 @@ def build_briefing(
 
     ranked = suggest(rows, fee_bps=fee, slippage_bps=slip,
                      min_stop_distance_pct=cfg.risk.min_stop_distance_pct,
-                     max_breakeven=max_breakeven)
+                     max_breakeven=max_breakeven,
+                     allow_short=cfg.risk.allow_short)
 
     b = DailyBriefing(
         as_of=as_of or _today(),
@@ -270,6 +282,7 @@ def build_briefing(
         timeframe=cfg.timeframe.execution,
         symbols_scanned=len(rows) + len(errors),
         signals_found=sum(1 for r in rows if getattr(r, "signal", 0) != 0),
+        shorts_skipped=list(ranked["shorts_skipped"]),
         data_errors=errors,
         rejected_technical=ranked["rejected"],
         fundamentals_enabled=bool(fcfg.enabled),
@@ -278,12 +291,20 @@ def build_briefing(
 
     # ---- fundamentals: gate the survivors, and say what could not be gated
     active = bool(fcfg.enabled) and fgates.active_gate_count(fcfg) > 0
+
+    # Coverage describes the *fetch*, not the gate. It used to be counted over the
+    # symbols the gates evaluated, which on a quiet day is the empty set: no setup
+    # fired, so nothing reached the gate, and ``tvlab daily`` printed "0 symbol(s)
+    # returned" over a full set of snapshots. That reads as a dead endpoint on a run
+    # where every symbol answered. Count what came back, and state separately how
+    # many names the gates actually looked at.
+    if snaps is not None:
+        b.fundamental_coverage = _fetch_coverage(snaps, requested=len(rows))
+
     if not active:
         b.rows = [_to_daily_row(c) for c in ranked["candidates"]]
-        b.fundamental_coverage = {}
         if fcfg.enabled and fgates.active_gate_count(fcfg) == 0:
-            b.notes.append("fundamentals.enabled is true but no threshold is set, "
-                           "so no fundamental gate ran")
+            b.notes.append(NOTE_NO_GATE)
     else:
         b.fundamentals_requested = snaps is not None or fundamentals_error is not None
         if snaps is None and not fundamentals_error:
@@ -302,7 +323,7 @@ def build_briefing(
                     "fundamentals unavailable - this name is NOT fundamentally screened",)
         else:
             outcome = fgates.screen([c.symbol for c in ranked["candidates"]], snaps, fcfg)
-            b.fundamental_coverage = outcome["coverage"]
+            b.fundamental_coverage["gated"] = len(ranked["candidates"])
             b.no_fundamental_data = list(outcome["no_data"])
             by_symbol = {v.symbol: v for v in outcome["approved"]}
             for v in list(outcome["rejected"]) + list(outcome["unrated"]):
@@ -337,6 +358,21 @@ def build_briefing(
 
     _set_outcome(b, ranked, errors)
     return b
+
+
+def _fetch_coverage(snaps: Dict[str, FundamentalSnapshot], requested: int) -> Dict[str, Any]:
+    """What the fundamentals request returned, counted independently of the gate.
+
+    ``coverage()`` counts snapshots, which is the right unit for "did the endpoint
+    answer" but says nothing about how many names were asked for. How many names
+    reached a gate is the other half of the sentence, and it is added by the caller
+    only when a gate actually ran: a ``gated: 0`` invented for a configuration with
+    no thresholds set would blame the technical and cost tests for an absence the
+    configuration caused.
+    """
+    cov = dict(coverage(list(snaps.values())))
+    cov["requested"] = int(requested)
+    return cov
 
 
 def _to_daily_row(c: Candidate) -> DailyRow:
@@ -424,6 +460,13 @@ def _set_outcome(b: DailyBriefing, ranked: Dict[str, Any],
         b.outcome = "all_rejected"
         b.outcome_detail = (f"{len(ranked['rejected'])} signal(s) found, all rejected "
                             f"by the cost test")
+    elif ranked["shorts_skipped"]:
+        # Signals existed, but every one of them was short. That is not a quiet
+        # market and not a cost rejection: the market's own rules removed them, and
+        # the detail says so rather than sending the user looking for setups.
+        b.outcome = "no_signals"
+        b.outcome_detail = (f"{len(ranked['shorts_skipped'])} signal(s) fired, all short, "
+                            f"and risk.allow_short is false for this market")
     elif b.rejected_fundamental:
         b.outcome = "screened_out"
         b.outcome_detail = (f"{b.signals_found} signal(s) fired, all screened out on "
@@ -484,6 +527,7 @@ def append_journal(briefing: DailyBriefing, out_dir: str | Path) -> Path:
         "is_validated": briefing.is_validated,
         "symbols_scanned": briefing.symbols_scanned,
         "signals_found": briefing.signals_found,
+        "n_shorts_skipped": len(briefing.shorts_skipped),
         "n_shortlist": len(briefing.rows),
         "n_rejected_technical": len(briefing.rejected_technical),
         "n_rejected_fundamental": len(briefing.rejected_fundamental),

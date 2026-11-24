@@ -164,6 +164,72 @@ def test_nothing_qualifying_exits_0_and_says_it_is_normal(runner, patch_scan,
     assert "normal state" in _flat(res.output)
 
 
+def test_a_quiet_day_reports_the_fundamentals_it_fetched_not_zero(runner, patch_scan,
+                                                                  patch_fundamentals,
+                                                                  isolated_output):
+    """A run with no setup must not print an endpoint outage.
+
+    The coverage line counted the gated candidates, so this exact run said
+    "fundamentals: 0 symbol(s) returned" while both snapshots had arrived.
+    """
+    patch_scan([_row("AAPL", signal=0), _row("MSFT", signal=0)])
+    patch_fundamentals({"AAPL": _snap("AAPL"), "MSFT": _snap("MSFT")})
+    res = runner.invoke(cli, ["daily", "--market", "us_equities", "--style", "swing"])
+    assert res.exit_code == 0, res.output
+    out = _flat(res.output)
+    assert "2 of 2 symbol(s) fetched" in out
+    assert "0 symbol(s) returned" not in out
+    assert "no candidate reached the gates" in out
+
+
+def test_daily_never_names_a_short_when_allow_short_is_false(runner, patch_scan,
+                                                           patch_fundamentals,
+                                                           isolated_output):
+    """The daily shortlist is the recommendation, so it must not carry a trade the
+    sizer will refuse. On a long-only market the signal is reported as dropped, not
+    silently swallowed - otherwise the run looks like a quiet day."""
+    patch_scan([_row("BEAR", signal=-1, last=100.0, stop=102.0, target=96.0)])
+    patch_fundamentals({"BEAR": _snap("BEAR")})
+    res = runner.invoke(cli, ["daily", "--market", "us_equities", "--style", "swing",
+                              "--set", "risk.allow_short=false", "--no-journal"])
+    assert res.exit_code == 0, res.output
+    out = _flat(res.output)
+    assert "BEAR" not in out
+    assert "1 short(s) dropped" in out
+    assert "allow_short is false" in out
+
+
+def test_no_configured_gate_does_not_blame_the_technical_side(runner, patch_scan,
+                                                             patch_fundamentals,
+                                                             isolated_output):
+    """Coverage must not accuse the scanner of rejecting setups that were never gated.
+
+    `fundamentals.enabled: true` with every threshold cleared is a no-op. The
+    coverage dict still said 0 gated, so the run printed "no candidate reached the
+    gates: no setup survived the technical and cost tests" - false, and pointing at
+    the wrong module. And once the 0 was gone the line was left unexplained, since
+    the reason ("no threshold is set") lived only in the journal notes.
+    """
+    patch_scan([_row("AAPL", signal=0)])
+    patch_fundamentals({"AAPL": _snap("AAPL")})
+    res = runner.invoke(cli, [
+        "daily", "--market", "us_equities", "--style", "swing",
+        "--set", "fundamentals.min_market_cap=null",
+        "--set", "fundamentals.require_positive_free_cash_flow=false",
+        "--set", "fundamentals.max_debt_to_equity=null",
+        "--set", "fundamentals.min_current_ratio=null",
+        "--set", "fundamentals.earnings_blackout_days=0",
+    ])
+    assert res.exit_code == 0, res.output
+    out = _flat(res.output)
+    assert "1 of 1 symbol(s) fetched" in out
+    assert "no candidate reached the gates" not in out
+    assert " gated" not in out, "a count with no gate behind it must not be printed"
+    # ...and the line still explains itself instead of leaving a bare fetch count
+    assert "no threshold is set" in out
+    assert "no fundamental gate ran" in out
+
+
 def test_partial_coverage_exits_0_and_states_its_coverage(runner, patch_scan,
                                                           patch_fundamentals,
                                                           isolated_output):

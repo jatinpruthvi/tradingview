@@ -395,6 +395,66 @@ def test_an_empty_fetch_result_is_a_coverage_fact_not_an_outage():
     assert not any("no fundamentals were fetched" in n for n in b.notes)
 
 
+def test_a_quiet_day_still_reports_the_fundamentals_it_fetched():
+    """No setup is not a dead endpoint.
+
+    Coverage was counted over the symbols the gates evaluated, which on a quiet day
+    is the empty set: nothing fired, so nothing reached a gate, and the briefing
+    reported "0 symbol(s) returned" while every snapshot had arrived - the same
+    sentence a network outage produces, on a run where the request succeeded. The
+    fetch has its own count, and how many names reached a gate is a separate fact,
+    because zero gated candidates is a normal market rather than a failure.
+    """
+    cfg = _cfg(enabled=True, min_market_cap=1e9)
+    rows = [_row("AAPL", signal=0), _row("MSFT", signal=0)]
+    snaps = {"AAPL": _snap("AAPL"), "MSFT": _snap("MSFT")}
+    b = build_briefing(rows, {}, cfg, snaps=snaps)
+
+    assert b.rows == []
+    assert b.fundamental_coverage["symbols"] == 2
+    assert b.fundamental_coverage["requested"] == 2
+    assert b.fundamental_coverage["complete"] == 2
+    assert b.fundamental_coverage["gated"] == 0
+
+    # And when a setup does reach the gate, it is counted there - coverage stays the
+    # fetch's number, so a gate rejection cannot inflate or deflate it.
+    b2 = build_briefing([_row("AAPL", signal=1)], {}, cfg,
+                        snaps={"AAPL": _snap("AAPL", market_cap=1e8)})
+    assert b2.fundamental_coverage["gated"] == 1
+    assert b2.fundamental_coverage["symbols"] == 1
+    assert b2.rows == [], "a market-cap rejection must still remove the name"
+
+
+def test_no_configured_gate_is_not_reported_as_a_technical_rejection():
+    """`enabled: true` with no threshold is a no-op, and reports only that.
+
+    The coverage dict used to carry a ``gated: 0`` from the branch where no gate ran,
+    and the CLI reads 0 gated as "every setup was rejected on the technical side" -
+    a claim about a screen that was never configured, and one that sends the reader
+    looking for a bug in the scanner. The key must simply be absent; the note already
+    says why no gate ran.
+    """
+    from tvlab.screener.fundamental import active_gate_count
+
+    # Every threshold cleared: enabled, but nothing to check.
+    cfg = _cfg(enabled=True, min_market_cap=None, require_positive_free_cash_flow=False,
+               max_debt_to_equity=None, min_current_ratio=None,
+               earnings_blackout_days=0, earnings_aftermath_days=0)
+    assert active_gate_count(cfg.fundamentals) == 0, "the premise is no active gate"
+
+    b = build_briefing([_row("AAPL", signal=0)], {}, cfg,
+                       snaps={"AAPL": _snap("AAPL")})
+    assert b.fundamental_coverage["symbols"] == 1
+    assert b.fundamental_coverage["requested"] == 1
+    assert "gated" not in b.fundamental_coverage
+    assert any("no fundamental gate ran" in n for n in b.notes)
+
+    # and a setup that is present still survives ungated, rather than being dropped
+    # by a gate that does not exist
+    b2 = build_briefing([_row("AAPL")], {}, cfg, snaps={"AAPL": _snap("AAPL")})
+    assert [r.symbol for r in b2.rows] == ["AAPL"]
+
+
 def test_an_unrecognised_verdict_is_flagged_rather_than_silently_distrusted():
     b = build_briefing([_row("AAPL")], {}, _cfg(),
                        study={"status": "ok", "verdict": "GREAT", "checks_passed": 9,
