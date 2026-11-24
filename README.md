@@ -115,7 +115,7 @@ tvlab scan     --market crypto --style swing          # who is in a setup right 
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 713 tests
+pytest                                                # 720 tests
 ```
 
 `tvlab daily` is the one to schedule. It composes the other three stages and writes
@@ -325,6 +325,36 @@ suggested on, because that bar closed before the decision existed.
 > win rate computed against reproducible-from-a-seed bars would be a property of the
 > data builder. Run this against a live or CSV source that has actually accumulated
 > history since you started journaling.
+
+Concretely, the CSV workflow is: journal each day, keep appending the new bars to the
+same files, then score. Nothing else has to change between the two.
+
+```bash
+# once, and again as bars arrive — appending to the same files is what makes review work
+tvlab data   --market crypto --style swing --symbols BTC/USDT,ETH/USDT \
+             --timeframe 1d --limit 400 --export data/live
+tvlab daily  --market crypto --style swing --symbols BTC/USDT,ETH/USDT \
+             --timeframe 1d --data-source csv --set data.csv_root=data/live
+tvlab review --market crypto --style swing --data-source csv \
+             --set data.csv_root=data/live --horizon 30
+```
+
+Two details are easy to get wrong and both fail loudly rather than silently. The
+exported timeframe has to be the one you then scan: `--timeframe` defaults to
+`timeframe.execution`, which is `4h` for the crypto/swing config, so exporting `1d`
+bars and running `daily` without `--timeframe 1d` reports `DataError: no 4h bars for
+symbol 'BTC/USDT'`. And `daily` scans the configured universe, not the symbols you
+exported, so `--symbols` has to be repeated or the other eight names fail the same
+way. `review` needs neither — it reads the timeframe each run recorded in the journal.
+
+A cache sits in front of every source, so `data/live` has to be named on each command
+that reads it — the cache key includes the directory *and* the files' mtimes and sizes.
+Both halves matter. Omitting the directory used to let two different `csv_root` values
+hash to one key and serve each other's bars; ignoring the file state used to mean that
+appending newly arrived history left the old bars cached, so suggestions stayed `open`
+forever no matter how much data accumulated. That second failure is invisible in the
+output — it looks like "too early to judge" — which is why it is pinned by a test that
+grows a file in place and asserts the new bars appear.
 
 The fetcher refuses to score a suggestion when the bars it retrieves do not reproduce
 the journaled entry price — `--entry-tolerance 0.005` by default, i.e. 0.5%, and
@@ -670,12 +700,12 @@ src/tvlab/         config, data/, indicators/, risk/, strategy/, backtest/,
                    dashboard/
 dashboard/static/  index.html + vendored lightweight-charts 5.3.0 (Apache-2.0, no CDN)
 scripts/           setup.sh (venv + deps + vendor), fetch-vendor.sh (rebuild vendor/)
-tests/             713 tests, 29 files - including lookahead positive controls
+tests/             720 tests, 29 files - including lookahead positive controls
 vendor/            18 reference repos, gitignored (632 MB); repos.txt + LOCK.json tracked
 output/            generated reports + output/daily/ journal, gitignored
 ```
 
-14,966 lines of source, 9,231 lines of tests.
+15,004 lines of source, 9,479 lines of tests.
 
 ---
 

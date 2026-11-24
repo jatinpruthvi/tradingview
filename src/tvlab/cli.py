@@ -926,8 +926,8 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
             # A required win rate above 100% is arithmetically what a book with no
             # winners implies, but printing it as a threshold invites the reader to
             # think a slightly better win rate would have passed. Say the fact instead.
-            console.print(f"  win rate     [red]0.0%[/red] [dim](n={summary.n_scored})"
-                          f"[/red][/dim]  [red]not one suggestion reached its target "
+            console.print(f"  win rate     [red]0.0%[/] [dim](n={summary.n_scored})"
+                          f"[/dim]  [red]not one suggestion reached its target "
                           f"or closed in profit[/red]")
         elif summary.clears_breakeven is None:
             console.print(f"  win rate     [yellow]{wr * 100:.1f}%[/yellow] "

@@ -23,6 +23,7 @@ different distance from its cause:
 """
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -240,3 +241,94 @@ def test_store_dispatches_to_csv_with_the_configured_root(exported):
     src = DataStore(cfg).source()
     assert isinstance(src, CsvSource)
     assert Path(src.root) == exported
+
+
+# ---------------------------------------------------------------- cache identity
+
+
+def _write_root(tmp_path, name, n, price, timeframe="4h"):
+    """A CSV root holding one symbol with `n` bars of a constant, unmistakable price.
+
+    A constant price is deliberate: it makes "which file did this come from" a single
+    float comparison rather than a frame diff, and it cannot accidentally match a
+    synthetic series.
+    """
+    root = tmp_path / name
+    root.mkdir()
+    idx = pd.date_range("2022-01-01", periods=n, freq=timeframe, tz="UTC")
+    close = np.full(n, price)
+    frame = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                          "close": close, "volume": 1.0}, index=idx)
+    frame.index.name = "timestamp"
+    frame.to_parquet(root / f"BTC_USDT_{timeframe}.parquet")
+    return root
+
+
+def _csv_store(tmp_path, root):
+    """A store over `root` with a throwaway cache, so these tests neither read the
+    repo's populated cache nor leave entries behind in it."""
+    cache = tmp_path / f"cache_{root.name}"
+    cfg = load_config(market="crypto", style="swing").merge({
+        "data.source": "csv", "data.csv_root": str(root),
+        "data.cache_dir": str(cache)})
+    return DataStore(cfg)
+
+
+def test_two_csv_roots_do_not_serve_each_others_bars(tmp_path):
+    """Naming the source is not the same as identifying it.
+
+    The cache key included the source name, `synthetic_bars` and `synthetic_seed`, but
+    nothing about *where* a CSV source reads from - so two different `data.csv_root`
+    values hashed to one key and the second silently served the first's bars. Found
+    while verifying `tvlab review`: a 120-bar fixture directory was handed a 400-bar
+    frame cached from an unrelated directory, and the entry-drift guard then reported
+    a 29% discrepancy between the journal and prices that were never its own. The
+    guard caught it, but a review against real data would have scored suggestions
+    against the wrong bars entirely.
+    """
+    a = _write_root(tmp_path, "root_a", 120, 51231.0)
+    b = _write_root(tmp_path, "root_b", 400, 41597.0)
+
+    fa = _csv_store(tmp_path, a).ohlcv("BTC/USDT", "4h", limit=1200)
+    fb = _csv_store(tmp_path, b).ohlcv("BTC/USDT", "4h", limit=1200)
+
+    assert len(fa) == 120 and len(fb) == 400
+    assert float(fa["close"].iloc[0]) == pytest.approx(51231.0)
+    assert float(fb["close"].iloc[0]) == pytest.approx(41597.0)
+
+
+def test_a_changed_csv_file_invalidates_its_cache_entry(tmp_path):
+    """The documented workflow is "journal daily, let the CSV grow, then score".
+
+    Appending newly accumulated history to a file that is already cached left the key
+    untouched, so the new bars never appeared and every suggestion kept being scored
+    against the history as it stood the first time it was read - which reports ideas
+    as `open` forever. This is the one path where `tvlab review` is actually useful,
+    and it was the one silently broken.
+    """
+    root = _write_root(tmp_path, "growing", 100, 30000.0)
+    store = _csv_store(tmp_path, root)
+    assert len(store.ohlcv("BTC/USDT", "4h", limit=1200)) == 100
+
+    # Same path, same symbol, same timeframe - more bars.
+    _write_root(tmp_path, "growing2", 150, 30000.0)
+    src = tmp_path / "growing2" / "BTC_USDT_4h.parquet"
+    dst = root / "BTC_USDT_4h.parquet"
+    dst.write_bytes(src.read_bytes())
+
+    assert len(store.ohlcv("BTC/USDT", "4h", limit=1200)) == 150, (
+        "the cache served stale bars after the file grew")
+
+
+def test_the_source_fingerprint_covers_only_sources_that_can_move(tmp_path, exported):
+    """Synthetic data is fully identified by (bars, seed, symbol, timeframe), so
+    fingerprinting it would invalidate 262 working cache entries for no reason."""
+    csv_cfg = load_config(market="crypto", style="swing").merge(
+        {"data.source": "csv", "data.csv_root": str(exported)})
+    csv_store = DataStore(csv_cfg)
+    ident = csv_store._source_identity("BTC/USDT", "4h", "csv")
+    assert str(exported) in ident
+    assert "BTC_USDT_4h.parquet" in ident
+
+    syn_store = DataStore(load_config(market="crypto", style="swing"))
+    assert syn_store._source_identity("BTC/USDT", "4h", "synthetic") == ""

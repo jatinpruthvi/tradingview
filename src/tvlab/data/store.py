@@ -25,7 +25,7 @@ from .base import (
     timeframe_seconds,
     validate_ohlcv,
 )
-from .csv_source import CsvSource
+from .csv_source import CsvSource, _symbol_filenames
 from .synthetic import DEFAULT_BASKET, basket
 
 log = logging.getLogger(__name__)
@@ -313,6 +313,43 @@ class DataStore:
         return out
 
     # ------------------------------------------------------------------ cache
+    def _source_identity(self, symbol, timeframe, src: str) -> str:
+        """Everything about the *source* that can change the bytes it returns.
+
+        The key already names the source, but naming it is not the same as identifying
+        it. For a CSV root two things are missing, and both are real rather than
+        theoretical:
+
+        * **Which directory.** Two different ``data.csv_root`` values hash to one key,
+          so the second silently serves the first's bars. Observed while verifying
+          ``tvlab review``: a 120-bar fixture directory was handed a 400-bar frame
+          cached from an unrelated directory, because the key said only ``csv``.
+        * **Whether the files changed.** Appending newly accumulated history to a file
+          that is already cached leaves the key untouched, so the new bars never
+          appear. That is precisely the workflow ``tvlab review`` documents - journal
+          daily, let the CSV grow, then score - and it would have scored every
+          suggestion against the history as it stood the first time it was read.
+
+        Fingerprinting by ``(name, mtime_ns, size)`` rather than by content keeps this
+        cheap enough to run on every request while still invalidating on any rewrite.
+        """
+        if src != "csv":
+            return ""
+        root = _csv_root(self.cfg)
+        parts = [str(root)]
+        names = _symbol_filenames(str(symbol))
+        cands = [f"{n}_{timeframe}" for n in names] + list(names) if timeframe \
+            else list(names)
+        for cand in cands:
+            for ext in (".csv", ".parquet", ".pq", ".jsonl", ".json"):
+                p = root / f"{cand}{ext}"
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                parts.append(f"{p.name}:{st.st_mtime_ns}:{st.st_size}")
+        return "|".join(parts)
+
     def _cache_key(self, symbol, timeframe, start, end, limit, source) -> str:
         src = source or self.cfg.data.source
         blob = "|".join([
@@ -320,6 +357,7 @@ class DataStore:
             src, str(symbol), str(timeframe), str(start), str(end), str(limit),
             str(self.cfg.universe.exchange), str(self.cfg.universe.market),
             str(self.cfg.data.synthetic_bars), str(self.cfg.data.synthetic_seed),
+            self._source_identity(symbol, timeframe, src),
         ])
         digest = hashlib.sha256(blob.encode()).hexdigest()[:16]
         safe = "".join(ch if ch.isalnum() else "_" for ch in str(symbol))[:40]

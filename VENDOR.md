@@ -542,8 +542,14 @@ licence means all rights reserved, not public domain. Educational reference only
 | Fill conventions shared with the backtester rather than reinvented (pessimistic intrabar tie, no exit on the entry bar) | `src/tvlab/screener/review.py`, matching `src/tvlab/backtest/engine.py` |
 | Entry-drift guard: a fetch that does not reproduce the journaled entry price is refused, not scored | `src/tvlab/screener/review.py` |
 | `OUTCOMES` / `SCORED_OUTCOMES` pinned, so a sixth state lands on the refusal side by default | `src/tvlab/screener/review.py` |
-| 81 more tests | `tests/test_review.py` (44), `tests/test_cli_review.py` (22), `tests/test_dashboard_review.py` (15) |
+| 85 more tests | `tests/test_review.py` (44), `tests/test_cli_review.py` (26), `tests/test_dashboard_review.py` (15) |
 | Two brittle JS-boundary fixtures made order-independent | `tests/test_dashboard_daily.py`, `tests/test_dashboard_review.py` |
+| `--entry-tolerance` is a real flag — the README had claimed the tolerance was `--set`-able, and `--set` on an unknown path is a silent no-op | `src/tvlab/cli.py`, `src/tvlab/dashboard/app.py`, `src/tvlab/screener/review.py` |
+| Suggested commands no longer print `--style None` when no style was named | `src/tvlab/cli.py` |
+| **Cache identity fixed** — the key named the source but not *where* a CSV source reads from, so two different `data.csv_root` values hashed to one key and served each other's bars | `src/tvlab/data/store.py` |
+| A CSV file that grows in place now invalidates its entry — the documented "journal daily, let the CSV grow, then score" workflow was silently scoring stale history | `src/tvlab/data/store.py` |
+| Zero-winner journals render instead of raising `MarkupError` — a stray `[/red]` with no opener, reachable only when every scored suggestion lost | `src/tvlab/cli.py` |
+| The CSV round trip is now covered end-to-end with no stubs, which is what surfaced the cache identity bug | `tests/test_cli_review.py`, `tests/test_csv_roundtrip.py` |
 
 **Still open, in rough order of value:**
 

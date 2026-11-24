@@ -170,6 +170,67 @@ def _rate_line(text):
     return re.search(r"win rate\s+[0-9]", text)
 
 
+def test_a_journal_with_no_winners_renders_instead_of_crashing(runner, isolated_output,
+                                                               patch_ohlcv):
+    """Zero winners is a real state, not an edge case - and it used to crash.
+
+    The `n_wins == 0` branch emitted `[red]0.0%[/red] [dim](n=1)[/red][/dim]`: a third
+    `[/red]` with no tag open to close. rich raises `MarkupError` at render time, so
+    `tvlab review` exited 1 on a journal whose suggestions had all lost, and the user
+    saw a traceback about markup instead of the result. Every other branch of this
+    block closes with the generic `[/]`, which is why only this one broke.
+
+    It survived this long because the only way to reach it is a journal that scored
+    at least one suggestion and won none of them. A journal where everything failed
+    to fetch exits 2 before the rate block; a journal with a mix takes the `clears_
+    breakeven` branch. This fixture is the all-losers case: two symbols on one date,
+    each anchored on bar 0 of its own frame, both stopped out.
+
+    (Two runs on two dates with one shared frame does not work: the second anchors on
+    bar 1, whose close is the stop price, so the drift guard correctly refuses it.)
+    """
+    runs = [_run("2026-01-01", [_sugg("LOSEA"), _sugg("LOSEB")])]
+    patch_ohlcv({"LOSEA": _series([_BAR0, (100.0, 97.5, 98.0)]),
+                 "LOSEB": _series([_BAR0, (100.0, 97.0, 97.5)])})
+    _write_journal(isolated_output, runs)
+
+    res = runner.invoke(cli, ["review", "--market", "crypto", "--style", "swing",
+                              "--horizon", "1"])
+    assert res.exit_code == 0, f"crashed with {res.exception!r}\n{res.output}"
+    out = _flat(res.output)
+    assert _rate_line(out), "the win-rate line did not render"
+    assert "0.0%" in out
+    assert "not one suggestion reached its target" in out
+    # and it must still say what was scored, rather than implying nothing was measured
+    assert "2 of 2 scored" in out
+    # A zero-win book has no winners to pay the promised R, so the divergence note is
+    # about there being nothing to apply the breakeven to - not about underpaying.
+    assert "no winners at all" in out
+    # Both rows are losses and both were scored, so the rates below describe them.
+    assert out.count("stop_loss") >= 2
+
+
+def test_the_no_winners_branch_has_no_stray_closing_tag():
+    """The crash was one unbalanced tag; pin the exact sequence that caused it.
+
+    A test that re-renders every literal in the block would be testing the test's own
+    string surgery - concatenating the three branches' literals is not valid markup
+    even when each branch is correct. Asserting the broken sequence is absent is the
+    honest guard, and it is specific enough that only reintroducing this bug trips it.
+    """
+    import tvlab.cli as climod
+
+    src = Path(climod.__file__).read_text(encoding="utf-8")
+    start = src.index("if summary.n_wins == 0:")
+    block = src[start:src.index("exp_c = ", start)]
+    assert "[/red][/dim]" not in block, (
+        "a [/red] with no opener to close: rich raises MarkupError at render time")
+    # Counting `[red]` against `[/red]` per literal would be wrong here: the branches
+    # split their markup across f-string lines and close with the generic `[/]`, so a
+    # correct block does not balance by that measure. Only the defect is pinned.
+    assert "[red]" in block and "[/]" in block, "expected the styled branch to be here"
+
+
 def test_coverage_is_printed_before_any_rate(runner, isolated_output, patch_ohlcv):
     runs, frames = _scoreable_journal(isolated_output)
     _write_journal(isolated_output, runs)
@@ -404,6 +465,101 @@ def test_set_cannot_reach_the_tolerance_and_the_docs_say_so(runner, isolated_out
     assert "--entry-tolerance" in readme, "the README must name the flag that exists"
     assert "silent no-op" in readme, \
         "the README should warn that --set cannot reach this"
+
+
+# ------------------------------------------------- the real-data round trip
+
+
+def test_the_csv_round_trip_scores_real_bars_with_zero_drift(runner, isolated_output,
+                                                             tmp_path, monkeypatch):
+    """The only path where this feature is useful, and the one every other test here
+    stubs out.
+
+    On synthetic data the generated window ends years in the past, so suggestions have
+    no bars after them and come back ``open`` or ``unscorable`` - correct, but it never
+    exercises the scoring. A CSV source that has actually accumulated history does.
+
+    This writes bars to disk under the filename convention ``tvlab data --export``
+    uses, journals entries whose prices are read back out of those bars, and runs the
+    real command with ``--data-source csv``. Nothing is monkeypatched. What it proves:
+
+    * ``CsvSource`` finds the exported file, including for a symbol whose name
+      contains a separator (``BTC/USDT`` -> ``BTC_USDT_1d.parquet``);
+    * the anchoring lands on exactly the bar the journal recorded, so ``entry_drift``
+      is 0.0 and the guard passes for the right reason rather than by tolerance;
+    * outcomes resolve against real prices, and the arithmetic hand-checks.
+    """
+    root = tmp_path / "bars"
+    root.mkdir()
+    n = 120
+    idx = pd.date_range("2022-01-01", periods=n, freq="D", tz="UTC")
+    rng = np.random.default_rng(11)
+    close = 50000.0 + np.cumsum(rng.normal(0, 400.0, n))
+    frame = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                          "close": close, "volume": 1.0}, index=idx)
+    frame.index.name = "timestamp"
+    frame.to_parquet(root / "BTC_USDT_1d.parquet")
+
+    # Journal entries priced from the bars themselves, at three points with enough
+    # history after them to resolve, plus one AT the final bar so there is no future
+    # to score against at all. Note that "few bars left" is not the same thing as
+    # "still open": if the stop is breached within two bars the outcome is known and
+    # is reported, correctly, as stop_loss. Only the absence of any bar after the
+    # suggestion forces `open`.
+    runs = []
+    for i in (20, 50, 80, n - 1):
+        e = float(close[i])
+        runs.append(_run(str(idx[i].date()), [
+            _sugg("BTC/USDT", last=e, stop=round(e * 0.98, 2),
+                  target=round(e * 1.06, 2))], timeframe="1d"))
+    (isolated_output / "output" / "daily").mkdir(parents=True, exist_ok=True)
+    (isolated_output / "output" / "daily" / "journal.jsonl").write_text(
+        "".join(json.dumps(r, default=str) + "\n" for r in runs), encoding="utf-8")
+
+    res = runner.invoke(cli, ["review", "--market", "crypto", "--style", "swing",
+                              "--data-source", "csv", "--horizon", "10", "--json",
+                              "--set", f"data.csv_root={root}"])
+    assert res.exit_code == 0, res.output
+    d = json.loads(res.output[res.output.index("{"):])
+
+    assert d["provenance"] == "csv"
+    assert d["n_suggestions"] == 4
+    # every row anchored on exactly the bar the journal recorded
+    assert [r["entry_drift"] for r in d["rows"]] == [0.0, 0.0, 0.0, 0.0]
+    # the last one has only 2 bars after it, so it must be open rather than scored
+    assert d["rows"][-1]["outcome"] == "open"
+    assert d["n_scored"] == 3 and d["n_open"] == 1 and d["n_unscorable"] == 0
+    # and the three that resolved did so against real prices
+    assert {r["outcome"] for r in d["rows"][:3]} <= {"take_profit", "stop_loss",
+                                                     "time_exit"}
+    for r in d["rows"][:3]:
+        assert r["bars_observed"] == 11           # the suggestion bar + 10 of horizon
+        assert np.isfinite(r["r_multiple"])
+
+
+def test_no_synthetic_warning_appears_for_a_csv_source(runner, isolated_output,
+                                                       tmp_path):
+    """The generator caveat is true of synthetic data and false of everything else.
+    Printing it for a real source would train the reader to ignore it."""
+    root = tmp_path / "bars"
+    root.mkdir()
+    # validate_ohlcv refuses fewer than 60 bars, so a 30-bar fixture fails before the
+    # code under test is ever reached - and fails as a "fetch failure", which would
+    # have looked like a real regression in the warning logic.
+    idx = pd.date_range("2022-01-01", periods=80, freq="D", tz="UTC")
+    close = np.full(80, 100.0)
+    frame = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                          "close": close, "volume": 1.0}, index=idx)
+    frame.index.name = "timestamp"
+    frame.to_parquet(root / "BTC_USDT_1d.parquet")
+    _write_journal(isolated_output,
+                   [_run(str(idx[5].date()), [_sugg("BTC/USDT")], timeframe="1d")])
+
+    res = runner.invoke(cli, ["review", "--data-source", "csv", "--horizon", "5",
+                              "--set", f"data.csv_root={root}"])
+    assert res.exit_code == 0, res.output
+    assert "measures the data generator" not in res.output
+    assert "source csv" in _flat(res.output)
 
 
 # ---------------------------------------------------------------------- prose
