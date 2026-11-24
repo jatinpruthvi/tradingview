@@ -57,6 +57,82 @@ def test_every_canonical_field_resolves_against_the_installed_enum():
         assert canonical in resolved
 
 
+# ------------------------------------------------- column resolution, tested alone
+#
+# These target `_column_lookup` and `_read` directly rather than going through
+# `build_snapshots`, and that is deliberate. The empty-key bug is now guarded in two
+# places - the lookup never indexes "" and `_read` never asks for a cleaned key that
+# came out empty - so an end-to-end test cannot make it fail any more. Testing only
+# through the integration path would have left the most dangerous of these bugs (a
+# market-cap gate silently reading the P/E column) with no test that catches a
+# regression in either guard.
+
+
+def test_a_column_lookup_never_indexes_an_empty_key():
+    """An empty key matches every lookup, so it returns one column for every field.
+
+    This is what made every fundamental read the same wrong value: the cleaning
+    class was `[^A-Z0-9]`, which strips every letter from a *lowercased* label, so
+    "price to earnings ratio (ttm)" cleaned to "" and `lookup[""]` answered for
+    market cap, ROE and everything else.
+    """
+    from tvlab.data.fundamentals import _column_lookup
+
+    df = _frame({"Name": ["INFY"],
+                 "Market Capitalization": [6.5e12],
+                 "Price to Earnings Ratio (TTM)": [27.1]})
+    lk = _column_lookup(df)
+    assert "" not in lk, "an empty key would match every lookup"
+    assert all(k for k in lk), "no key in the lookup may be empty"
+
+
+def test_an_all_punctuation_column_never_becomes_a_wildcard_key():
+    """The guard's only reachable case once the cleaning class is case-insensitive:
+    a column whose name is entirely punctuation cleans to "", and an indexed "" would
+    answer for every field. A scanner returning "-" or "n/a" as a header is not
+    exotic enough to leave unguarded."""
+    from tvlab.data.fundamentals import _column_lookup, _read
+
+    df = _frame({"-": ["x"], "market_cap_basic": [6.5e12]})
+    lk = _column_lookup(df)
+    assert "" not in lk
+    row = df.iloc[0]
+    assert _read(row, lk, ["market_cap_basic"]) == pytest.approx(6.5e12)
+    # the junk column must not be reachable through a cleaned lookup either
+    assert _read(row, lk, ["roe", "Return on Equity"]) is None
+
+
+def test_a_punctuation_variant_column_still_resolves():
+    """The cleaned key is what makes matching survive a label the scanner spells
+    slightly differently. If the cleaning class is case-sensitive this key becomes
+    "" and the fallback silently dies - matching then depends on the endpoint using
+    the exact spelling, which is the fragility the fallback exists to remove."""
+    from tvlab.data.fundamentals import _column_lookup, _read
+
+    df = _frame({"Market-Capitalization": [6.5e12], "Return on Equity!": [0.31]})
+    lk = _column_lookup(df)
+    assert lk.get("marketcapitalization") == "Market-Capitalization"
+    assert lk.get("returnonequity") == "Return on Equity!"
+
+    row = df.iloc[0]
+    # neither the field name nor the exact label is present as a column; only the
+    # punctuation-insensitive form can find these
+    assert _read(row, lk, ["market_cap_basic", "Market Capitalization"]) == pytest.approx(6.5e12)
+    assert _read(row, lk, ["return_on_equity", "Return on Equity"]) == pytest.approx(0.31)
+
+
+def test_two_columns_that_clean_to_the_same_key_do_not_collide_silently():
+    """First writer wins, so a collision is deterministic rather than dependent on
+    dict ordering - and the exact key still resolves both columns correctly."""
+    from tvlab.data.fundamentals import _column_lookup, _read
+
+    df = _frame({"Market Capitalization": [6.5e12], "market-capitalize-tion": [1.0]})
+    lk = _column_lookup(df)
+    row = df.iloc[0]
+    assert _read(row, lk, ["Market Capitalization"]) == pytest.approx(6.5e12)
+    assert _read(row, lk, ["market-capitalize-tion"]) == pytest.approx(1.0)
+
+
 def test_no_candidate_name_is_speculative():
     """Every name in FIELD_CANDIDATES must exist on the installed enum.
 

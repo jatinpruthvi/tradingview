@@ -536,7 +536,7 @@ licence means all rights reserved, not public domain. Educational reference only
 | The daily workflow: scan + rank + gates, verdict attached, journal written | `src/tvlab/screener/daily.py` (new) |
 | `tvlab daily`, `GET /api/daily`, dashboard Daily panel | `src/tvlab/cli.py`, `src/tvlab/dashboard/app.py`, `dashboard/static/index.html` |
 | **Session-filter crash fixed** — every non-crypto market was unusable on synthetic data | `src/tvlab/data/synthetic.py` |
-| 126 more tests | `tests/test_fundamentals.py`, `tests/test_daily_workflow.py`, `tests/test_cli_daily.py`, `tests/test_dashboard_daily.py`, `tests/test_synthetic_session_filter.py` |
+| 133 more tests | `tests/test_fundamentals.py` (43), `tests/test_daily_workflow.py` (36), `tests/test_cli_daily.py` (16), `tests/test_dashboard_daily.py` (13), `tests/test_synthetic_session_filter.py` (25) |
 
 **Still open, in rough order of value:**
 

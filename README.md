@@ -114,7 +114,7 @@ tvlab scan     --market crypto --style swing          # who is in a setup right 
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 625 tests
+pytest                                                # 632 tests
 ```
 
 `tvlab daily` is the one to schedule. It composes the other three stages and writes
@@ -538,6 +538,20 @@ Without the mask you mostly measure the filter, not the detector.
 These are recorded because each one produced *plausible* output while being
 wrong, and each is now a regression test.
 
+"Is now a regression test" is a claim worth checking rather than making, because a
+test that cannot fail is decoration. Bugs 17-20 were each verified by **reverting
+the fix and confirming a named test fails**: 17 by `test_synthetic_session_filter.py`,
+18 by `test_an_all_punctuation_column_never_becomes_a_wildcard_key` and
+`test_a_punctuation_variant_column_still_resolves`, 19 and 20 by
+`test_daily_workflow.py`.
+
+Bug 18 needed that check twice. The first sweep reported it *missed* — the fix had
+been applied in two places, and the second guard made the first untestable through
+the integration path, so `build_snapshots` could no longer be made to fail however
+the lookup was broken. The tests that now catch it drive `_column_lookup` and `_read`
+directly. A bug guarded twice still needs a test for each guard, or half the
+defence is unverified.
+
 | # | Bug | Symptom | Fix |
 |--:|:----|:--------|:----|
 | 1 | `SizingResult.accepted` tested `units > 0` | **every short silently rejected**, reason `"ok"` | `abs(units) > 0` |
@@ -585,7 +599,7 @@ src/tvlab/         config, data/, indicators/, risk/, strategy/, backtest/,
                    dashboard/
 dashboard/static/  index.html + vendored lightweight-charts 5.3.0 (Apache-2.0, no CDN)
 scripts/           setup.sh (venv + deps + vendor), fetch-vendor.sh (rebuild vendor/)
-tests/             625 tests, 26 files - including lookahead positive controls
+tests/             632 tests, 26 files - including lookahead positive controls
 vendor/            18 reference repos, gitignored (632 MB); repos.txt + LOCK.json tracked
 output/            generated reports + output/daily/ journal, gitignored
 ```
