@@ -1,4 +1,4 @@
-"""The strategies. Three of them, on purpose.
+"""The strategies. Four of them, on purpose.
 
 ``smc_trend`` is the intended edge: a liquidity sweep into a confirmed swing, in
 the direction of the higher-timeframe trend, with the stop beyond the sweep and
@@ -6,6 +6,12 @@ the target at the next resting liquidity pool. ``ema_pullback`` and
 ``donchian_breakout`` are deliberately dull baselines - if the SMC setup cannot
 beat a 20-line moving-average pullback out of sample, it is not an edge, it is
 decoration. Always run the baselines.
+
+``orb`` is the opening-range breakout, added because it is the only rule measured
+on live NSE intraday data with a gross edge that is not noise (t = 3.2). It is
+registered so the walk-forward harness can judge it, not because it is known to
+make money - at the config's 16 bp round trip it does not. See
+``docs/PROFITABILITY_BACKLOG.md``.
 """
 
 from __future__ import annotations
@@ -346,6 +352,135 @@ class DonchianBreakoutStrategy(Strategy):
         out["target"] = target
         out["tag"] = np.where(sig > 0, "breakout_long",
                               np.where(sig < 0, "breakout_short", ""))
+        return out
+
+
+@register("orb")
+class OpeningRangeBreakout(Strategy):
+    """Break of the first 15 minutes of the session, flat by the close.
+
+    The rule
+    --------
+    1. Take the high and low of the first ``range_bars`` bars of the session
+       (3 bars = 09:15-09:30 on 5m NSE data).
+    2. Take the first break of that range, whichever side breaks first. If one
+       bar breaks both sides the session is skipped - OHLC cannot tell which
+       side came first, and guessing is how a backtest invents an entry.
+    3. Stop at the opposite side of the range, optionally buffered by ATR.
+    4. Exit at the session close (``exit_tod``), so nothing is held overnight.
+
+    One entry per session: a range is a single decision, and re-entering it every
+    time price pokes back through turns one idea into five correlated trades.
+
+    What has been measured, so this is not sold as a winner
+    -------------------------------------------------------
+    On 60 live NSE names x 60 sessions of 5m bars (3,510 breakouts) the basket
+    grossed **+13.4 bp per day, t = 3.23** - the only non-noise gross edge found
+    in this project. At the Indian config's 16 bp round trip it nets **-2.6 bp**,
+    and it is green on only 40% of days with an 8-day losing run. A relative-
+    volume filter (the published "stocks in play" refinement) did not survive a
+    causal test: it turns negative once the volume window stops peeking past the
+    entry. Full numbers in ``docs/PROFITABILITY_BACKLOG.md``.
+
+    So: run it through the walk-forward harness to see whether a longer, cleaner
+    sample rescues it. Do not read this docstring as a recommendation.
+
+    Frames that are not intraday (median bar spacing >= 20h) produce no signals,
+    because a session is a single bar and there is no range to break.
+    """
+
+    defaults: Dict[str, Any] = {
+        "range_bars": 3,
+        "atr_period": 14,
+        "stop_buffer_atr": 0.0,
+        #: last bar of the session, as "HH:MM" in the frame's own timezone
+        "exit_tod": "15:25",
+        "allow_short": True,
+        "max_bars_in_trade": None,   # the session exit is the exit
+    }
+
+    grid: Dict[str, tuple] = {
+        "range_bars": (2, 3, 6),
+        "stop_buffer_atr": (0.0, 0.5),
+    }
+
+    def signals(self, df: pd.DataFrame, bias: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        p = self.params
+        out = blank_signals(df)
+        n = len(df)
+        idx = df.index
+        if n == 0 or not isinstance(idx, pd.DatetimeIndex):
+            return out
+
+        tod = (idx.hour * 60 + idx.minute).to_numpy()
+        day = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+        spacing = pd.Series(idx).diff().median()
+        intraday = bool(pd.notna(spacing) and spacing < pd.Timedelta(hours=20))
+
+        # A session close is knowable from the clock alone. Deriving it from
+        # "this is the last row of the date" would need the NEXT bar's date and
+        # is therefore lookahead - the audit in validation/lookahead.py catches it.
+        exit_flags = np.zeros(n)
+        exit_cut = None
+        if intraday:
+            hh, mm = str(p["exit_tod"]).split(":")
+            exit_cut = int(hh) * 60 + int(mm)
+            exit_flags[tod >= exit_cut] = 1.0
+        out["exit"] = exit_flags
+
+        hi = df["high"].to_numpy(dtype="float64")
+        lo = df["low"].to_numpy(dtype="float64")
+        a = atr(df, int(p["atr_period"])).to_numpy(dtype="float64")
+        rb = int(p["range_bars"])
+        buf = float(p["stop_buffer_atr"])
+
+        sig = np.zeros(n)
+        stop = np.full(n, np.nan)
+        tags = [""] * n
+
+        codes = pd.factorize(day)[0]
+        cuts = np.flatnonzero(np.diff(codes)) + 1
+        starts = np.r_[0, cuts]
+        ends = np.r_[cuts, n]
+        for s, e in zip(starts, ends):
+            if e - s < rb + 1:
+                continue
+            rhi = float(hi[s:s + rb].max())
+            rlo = float(lo[s:s + rb].min())
+            step = 0
+            for i in range(s + rb, e):
+                if i > s:
+                    d = int(tod[i] - tod[i - 1])
+                    step = d if 0 < d <= 60 else step
+                # The engine fills on the NEXT bar's open, so a break needs a bar
+                # left to hold it. Both tests are clock-only: reading the next
+                # bar's flag would be lookahead, and the audit rejects it.
+                if exit_cut is not None and (exit_flags[i]
+                                             or (step and tod[i] + 2 * step > exit_cut)):
+                    break
+                up, dn = hi[i] > rhi, lo[i] < rlo
+                if up and dn:
+                    break                      # ambiguous bar: skip the session
+                if up:
+                    sig[i] = 1.0
+                    stop[i] = rlo - buf * (a[i] if np.isfinite(a[i]) else 0.0)
+                    tags[i] = "orb_long"
+                    break
+                if dn:
+                    if not p["allow_short"]:
+                        break
+                    sig[i] = -1.0
+                    stop[i] = rhi + buf * (a[i] if np.isfinite(a[i]) else 0.0)
+                    tags[i] = "orb_short"
+                    break
+
+        out["signal"] = sig
+        out["stop"] = stop
+        # +inf is the engine's explicit "no target" sentinel. Leaving this NaN
+        # would let the engine substitute a 4-ATR target, which is NOT the rule
+        # that was measured: the measured exit is the session close.
+        out["target"] = np.inf
+        out["tag"] = tags
         return out
 
 

@@ -53,6 +53,105 @@ is 2.05 ATR, a 1R breakeven cut sits exactly where normal pullbacks live.
 This is the shape of the whole exercise: **the intuitive improvement was negative,
 and the measurement said so in one command.**
 
+**VWAP as a stock picker** (measured, negative — no code changed): the repo has
+`indicators.technical.vwap` and nothing reads it, so before wiring it into
+ranking the question was asked directly — does "price above VWAP" pick today's
+best stock? Measured on live NSE bars: 60 names chosen by traded value, 60
+sessions of 5m bars (3,600 name-days) and 496 sessions of daily bars (29,150
+name-days), cross-sectional Spearman IC with days as the observations, each day
+demeaned so a market-wide move cannot manufacture a ranking.
+
+| signal | predicts | IC | t | top-minus-bottom quintile |
+|---|---|---:|---:|---:|
+| 09:40 close vs session VWAP (5m) | rest of the same day | +0.010 | 0.6 | +7.7 bp (t=1.4) |
+| 09:40 close vs session VWAP (5m) | next session | -0.143 | -5.7 | -43.2 bp (t=-4.05) |
+| close-in-range, daily | next day | -0.033 | -4.5 | 12.5 bp |
+| close-in-range, daily | next 5 days | -0.016 | -2.2 | — |
+| distance from EMA20, daily (control) | next day | +0.003 | 0.3 | — |
+
+**Same day: nothing.** +0.010 with t=0.6 over 3,600 name-days is
+indistinguishable from zero, and the quintile ladder is noise (-9.0 / +3.3 /
+-3.4 / +3.1 / +5.9 bp): no ordering, and the middle three buckets change sign. A
+ranking signal has to sort names; this one does not.
+
+**Next day: real and negative.** Names trading above VWAP underperform the next
+session by -0.143 IC intraday and -0.033 daily (t=-4.5 over 493 days), and the
+daily quintiles do sort monotonically (6.5 / 1.5 / 0.9 / -2.8 / -6.0 bp).
+Extension is a chase, not a trend. It survives the obvious objection: strip the
+day's own return out of the signal and the residual still predicts -0.110
+(t=-5.71). But it is mostly the day's move (correlation 0.73 with it, 0.23 with
+EMA20 distance), so it is not independent information.
+
+**Tradeable: no, at this size.** The daily spread is 12.5 bp against ~16 bp of
+round-trip cost in the Indian config (3+5 bp per side), and the intraday
+version's 43 bp sits on the leg `risk.allow_short: false` forbids. That makes it
+a veto ("do not chase a name 2σ above VWAP today") and a cost check — not a way
+to choose the best stock of the day.
+
+Caveats, because they bound the result: names are picked by *today's* traded
+value (survivorship and liquidity bias), the intraday sample is one 60-session
+window (Yahoo's cap), and the ICs are cost-free.
+
+**Opening-range breakout (ORB)** (measured, and now registered as `orb`): the only
+gross edge found in this project that is not noise. Rule: take the high and low of
+the first 15 minutes, trade the first break of that range, stop at the other side,
+exit at the session close. Measured on 60 live NSE names x 60 sessions of 5m bars
+(3,510 breakouts), one 16 bp round trip per day:
+
+| rule | gross/day | net/day | t | green days | longest red run |
+|---|---:|---:|---:|---:|---:|
+| ORB, all breakouts, long+short | +13.4 bp | -2.6 bp | 3.23 | 40.0 % | 8 |
+| ORB + relative-volume filter (causal) | +10.8 bp | -5.2 bp | 1.63 | 46.0 % | — |
+| gap fade | +5.2 bp | -10.8 bp | 0.55 | 36.7 % | 7 |
+| VWAP fade at 10:00 | -32.4 bp | -48.4 bp | -3.46 | 27.1 % | 14 |
+| equal-weight hold (benchmark) | +4.5 bp | -11.5 bp | 0.39 | 45.0 % | 7 |
+
+The fill does not flatter it: entering at the next bar's open instead of the
+breaking bar's close gives the same +13.4 bp, because 5m bars are contiguous.
+
+**The published "stocks in play" refinement did not survive a causal test.** A
+relative-volume filter computed over the first 40 minutes showed +9.6 bp net
+(t=2.71); restricted to the opening range alone - the only volume knowable before
+a 09:30 breakout - it is -5.2 bp. The first version was lookahead, and it is the
+most useful negative result in this file: a filter looks like the edge when it is
+really reading tape the entry has not seen yet.
+
+Run through the walk-forward harness (`study --strategy orb`, RELIANCE/TCS/INFY,
+5m, 6-combo grid, 30 trials): 40 trades, 25.0 % win rate, profit factor 1.08,
+expectancy +16.33, deflated Sharpe 0.260 (**fail**), 2/5 out-of-sample windows
+profitable, OOS return -0.17 %. The harness reaches the same verdict the study
+did: not validated. A 25 % win rate with a 3.24 payoff is the shape of the thing
+- many small losses, a few large wins - which is exactly why "profitable every
+day" is the wrong goal.
+
+**Next-session reversal is a veto, not a trade** (measured, no ranking code
+changed): close-in-range predicts the next day at IC -0.033 (t=-4.48 over 493
+sessions, Q1-Q5 12.5 bp). That is close-to-close, and yesterday's close is not a
+price you can trade. Re-measured with an executable fill - buy today's open, sell
+today's close - on 60 names x 496 sessions:
+
+| rule | gross/day | net/day | t |
+|---|---:|---:|---:|
+| long bottom decile by prior-day return | -2.5 bp | -18.5 bp | -0.47 |
+| long bottom - short top decile, prior return | +12.0 bp | -20.0 bp | 2.67 |
+| long bottom - short top decile, close-in-range | +6.5 bp | -25.5 bp | 1.69 |
+
+Most of the reversal is paid in the overnight gap: yesterday's biggest winners
+gap **+16.9 bp** and then give back **-12.4 bp** open-to-close. By 09:15 the move
+has happened. Holding longer does not rescue it either - non-overlapping 3/5/10/20
+session tranches produce no net-positive, statistically meaningful cell, and from
+5 sessions out the excess versus the equal-weight universe is negative, i.e. beta
+rather than alpha. The usable form is a zero-cost veto on a swing entry.
+
+**"Profitable every day" is not a strategy that exists in this data.** ORB's best
+case is green on 40 % of days with 8 consecutive losses. Even the hindsight ceiling
+is low: the average name is up open-to-close on only 56.7 % of days. Externally,
+SEBI's FY2022-23 study finds 71 % of individual intraday traders lose money, rising
+to **80 %** for those doing more than 500 trades a year; the NBER study of SENSEX
+day traders finds them losing in every one of seven years, at -3.8 bp per trade. A
+positive expectancy with a 40 % daily hit rate is the realistic shape; a rule that
+is green every day is not.
+
 ---
 
 ## Tier 1 — fixes to the measurement itself (do before anything else)
@@ -68,6 +167,10 @@ does not have, which is the precondition for trusting anything in Tier 2.
 | 4 | **Cross-market validation** | A rule that only works on synthetic crypto is a coincidence generator. | The same config on 2+ markets, same sign. |
 | 5 | **Partial fills / liquidity cap** | Sizing ignores `min_quote_volume` at trade time; a 25%-of-equity position in a thin alt is not achievable. | Cap units at a fraction of the bar's volume and see if P&L survives. |
 
+Item 1 has since been measured for the intraday case: ORB is +13.4 bp gross and
+-2.6 bp net at the config's 16 bp, so it only turns positive below ~13 bp of round
+trip. At the 25-30 bp real delivery cost in the same row it is clearly negative.
+
 ## Tier 2 — the hypothesis, not the plumbing (each measured in isolation)
 
 | # | Item | Why it might work | Risk |
@@ -77,10 +180,16 @@ does not have, which is the precondition for trusting anything in Tier 2.
 | 8 | **Shorter time exit** | `max_bars_in_trade: 120` (India) is 6 months; a 4h crypto trade at 90 bars is 15 days. Trades that neither hit stop nor target are dead money. Shorten and re-measure. | None; it is a `--set`. |
 | 9 | **Volatility-targeted sizing** | Fixed 0.5% risk per trade gives the same notional to a 1% and a 20% vol name; crypto and equities then cannot be compared. | Sizing changes concentration, so correlation caps must be re-checked. |
 | 10 | **Stop distance vs implied move** | 8 of 15 measured Indian candidates had stops inside 1σ of the 28-day option-implied move — those stops are inside the noise. Widen or skip. | Wider stop = smaller size = same risk, but fewer target hits. |
-| 11 | **Entry timing filter (avoid extension)** | Entering at the close of a confirmation bar is late; the stop often sits inside the retracement that follows. | Adds a parameter; must not become a curve-fit. |
+| 11 | **Entry timing filter (avoid extension)** | Entering at the close of a confirmation bar is late; the stop often sits inside the retracement that follows. VWAP extension was measured first (above): -0.033 next-day IC, below costs. | Adds a parameter; must not become a curve-fit. |
 | 12 | **Correlation-aware portfolio construction** | BTC+ETH is one bet at 25% each (correlation cap caught it, yet both were funded). Weight by cluster, not by symbol. | Needs a covariance window; unstable in short samples. |
 | 13 | **Time-of-day / session filter** | Indian intraday edge concentrates in the first and last hour; 4h crypto bars are not uniform in activity. | More splits = more trials. |
 | 14 | **Asymmetric R** | Fixed 2.5R target is arbitrary. Test 1.5/2.5/4 R as three *separate* trials and let DSR charge for the search. | Explicitly a 3-trial search. |
+
+Item 13 has since been measured: no clock-based rule validated. A 09:30 entry is
+better than 09:45 only on execution (entry-bar range 0.35 % vs 0.44 %, 4.7 bp of
+drift given up, t=1.56), and the equal-weight basket loses to cost at both clocks
+(-3.6 / -8.4 bp net). The only non-noise intraday edge found is price-triggered
+(ORB), not time-triggered.
 
 ## Tier 3 — structural improvements to the research loop
 
@@ -114,6 +223,18 @@ does not have, which is the precondition for trusting anything in Tier 2.
   `backtest.breakeven_at_r`, both `null` by default so no published study moves;
   4 tests, including the intrabar-order guarantee and the R-denominator trap.
   Measured above: both negative on this strategy.
+- **VWAP** — `indicators.technical.vwap` exists and is lookahead-audited, and is
+  read by no strategy, screener or ranking step. The measurement above is why:
+  it has no same-day ranking power. Nothing was changed to act on it.
+- **Opening-range breakout** — `strategy/setups.py::OpeningRangeBreakout`,
+  registered as `orb`: one break per session, stop at the other side of the
+  range, no target, flat by the session close. 6 tests; the lookahead audit picks
+  it up automatically through `available()`. Measured above: the only non-noise
+  gross edge, and still rejected by the walk-forward harness.
+- **Session-close exit** — an optional `exit` column in the signal frame
+  (`backtest/engine.py`). Additive and off unless a strategy sets it; stops and
+  targets still take precedence, because they are intrabar events that happen
+  before the closing print.
 
 Nothing in Tier 2 or Tier 3 is implemented. That is deliberate, and the
 measurement of the two exit rules is the argument for it.

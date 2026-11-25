@@ -6,6 +6,11 @@ Execution model
   **open of bar ``i+1``**. This is the single most important line in the file:
   acting on the same bar's close is the standard way backtests get rich and
   live accounts get poor.
+* An optional ``exit`` column in the signal frame closes the position at that
+  bar's **close**. Intraday strategies must be flat by the session close, and no
+  other exit rule can express "this is the last bar of the session". A bar
+  flagged for exit never opens a position - entering there would mean the
+  position could only be closed on the next bar, i.e. after the overnight gap.
 * Stops and targets are checked against the bar's ``high``/``low``. When one bar
   touches both, ``intrabar_fill="pessimistic"`` (the default) assumes the **stop
   was hit first**. We cannot know the intra-bar path from OHLC, so we take the
@@ -147,6 +152,11 @@ class Backtester:
                    if atr is not None else None)
 
         n = len(df)
+        #: optional per-bar "close at this bar's close" flag. Intraday strategies
+        #: need to be flat by the session close, and stop/target/time-exit cannot
+        #: express "this is the last bar of the session".
+        exit_sig = (np.ascontiguousarray(signals["exit"].to_numpy(dtype="float64"))
+                    if "exit" in signals else np.zeros(n))
         times = df.index
         governor = RiskGovernor(cfg.risk, cfg.backtest.initial_capital)
         cash = float(cfg.backtest.initial_capital)
@@ -209,7 +219,7 @@ class Backtester:
             if units != 0:
                 exit_px, reason = self._check_exit(
                     i, h[i], l[i], c[i], o[i], side, stop_px, tgt_px,
-                    entry_i, max_bars, sig[i], pessimistic,
+                    entry_i, max_bars, sig[i], pessimistic, bool(exit_sig[i]),
                 )
                 # NOTE: the stop used above is the one in force when the bar
                 # opened. Any ratchet below takes effect on the NEXT bar, so a
@@ -252,8 +262,13 @@ class Backtester:
                     )
 
             # ---------------- 3. open a new position --------------------------
-            if units == 0 and i > 0:
-                want = sig[i - 1] if next_open else sig[i]
+            # not on a session-exit bar: the position could not be closed until
+            # the next bar, which is the other side of the overnight gap
+            if units == 0 and i > 0 and not exit_sig[i]:
+                # A signal emitted on a session-exit bar dies with the session:
+                # the next bar is the other side of the overnight gap, and the
+                # rule that produced it was an intraday one.
+                want = (0.0 if exit_sig[i - 1] else sig[i - 1]) if next_open else sig[i]
                 if want != 0:
                     can, why = governor.can_open()
                     if not can:
@@ -363,6 +378,9 @@ class Backtester:
                 out[col] = 0.0 if col == "signal" else np.nan
         if "tag" not in out.columns:
             out["tag"] = ""
+        if "exit" not in out.columns:
+            out["exit"] = 0.0
+        out["exit"] = out["exit"].fillna(0.0)
         out["signal"] = out["signal"].fillna(0.0).clip(-1, 1)
         bad = out["signal"].abs() > 0
         if bad.any() and not np.isclose(out.loc[bad, "signal"].abs(), 1.0).all():
@@ -430,7 +448,8 @@ class Backtester:
 
     def _check_exit(self, i: int, hi: float, lo: float, close: float, open_: float,
                     side: int, stop: float, target: float, entry_i: int,
-                    max_bars: Optional[int], sig_now: float, pessimistic: bool
+                    max_bars: Optional[int], sig_now: float, pessimistic: bool,
+                    exit_now: bool = False
                     ) -> Tuple[Optional[float], str]:
         """Decide whether this bar closes the position, and at what price.
 
@@ -462,6 +481,12 @@ class Backtester:
             return stop, "stop_loss"
         if hit_target:
             return target, "take_profit"
+
+        if exit_now:
+            # A strategy-declared session close. Deliberately checked AFTER the
+            # stop/target branches: those are intrabar events that happen before
+            # the closing print, so a bar that stops out never reaches this line.
+            return close, "session_exit"
 
         if max_bars is not None and (i - entry_i) >= max_bars:
             return close, "time_exit"
