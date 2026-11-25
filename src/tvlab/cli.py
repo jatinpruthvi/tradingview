@@ -1289,6 +1289,11 @@ def study(market, style, config, set_pairs, symbols, strategy_name, data_source,
     from .study import run_full_study
 
     cfg = _cfg(market, style, config, set_pairs, data_source)
+    if strategy_name:
+        # --strategy was accepted but never applied, so `study --strategy orb`
+        # silently ran the configured default. Merging here also rebuilds
+        # params_for, so the new strategy starts from its own defaults.
+        cfg = cfg.merge({"strategy.name": strategy_name})
     if out is None:
         out = Path(cfg.output.dir) / f"{cfg.strategy.name}_{cfg.universe.market}_{cfg.timeframe.execution}"
 
