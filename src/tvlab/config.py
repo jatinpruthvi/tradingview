@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field, fields, replace, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -85,6 +85,10 @@ class UniverseConfig:
     exchange: str = "binance"
     quote_currency: str = "USDT"
     min_quote_volume: float = 1_000_000.0
+    #: Cap on a universe built *from the data source* (an index listing or the
+    #: screener). ``0`` or negative means no cap - which is what the Indian market
+    #: config sets, because "NIFTY 500 + F&O" is the universe, not 12 names. The
+    #: hand-typed ``symbols`` list is never truncated by this.
     max_symbols: int = 20
     #: Which NSE index ``--data-source nse`` pulls its universe and market-watch
     #: snapshot from. One market-watch call returns every member with price,
@@ -127,6 +131,12 @@ class BacktestConfig:
     entry_on_next_open: bool = True
     max_bars_in_trade: Optional[int] = None
     seed: int = 42
+    #: trail the stop this many ATRs behind the best price since entry.
+    #: ``None`` (default) leaves the stop where the signal put it.
+    trail_atr_mult: Optional[float] = None
+    #: once the trade is this many R in profit, move the stop to the entry price.
+    #: ``None`` (default) never moves it.
+    breakeven_at_r: Optional[float] = None
 
 
 @dataclass(frozen=True)

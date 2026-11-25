@@ -10,6 +10,12 @@ Execution model
   touches both, ``intrabar_fill="pessimistic"`` (the default) assumes the **stop
   was hit first**. We cannot know the intra-bar path from OHLC, so we take the
   adverse branch - the only choice that does not flatter the strategy.
+* A stop the bar **opens** through fills at the **open**, not at the stop price:
+  the market gapped past the level and never traded there, so a fill at the stop
+  is a price nobody could have got. Measured on this repo's own runs, 17 of 101
+  crypto/swing stop exits were gap fills, and pricing them at the stop overstated
+  P&L by about 3% of a ₹100k account. Targets stay at the limit price, which a
+  limit order can never fill worse than.
 * Every fill pays ``fee_bps`` on notional plus ``slippage_bps`` of adverse price
   movement, on both entry and exit.
 * Equity is marked to market at each bar close, so drawdown is measured on
@@ -28,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -155,6 +161,12 @@ class Backtester:
         entry_tag = ""
         entry_equity = np.nan
         entry_throttle = 1.0
+        #: the stop the position was SIZED against. Trailing may move the live
+        #: stop, but R must stay measured against the risk actually taken, or a
+        #: trailed stop would shrink the denominator and inflate every R.
+        entry_stop = np.nan
+        #: best price since entry - the reference a trailing stop hangs off
+        best_px = np.nan
 
         equity_arr = np.empty(n)
         drawdown_arr = np.empty(n)
@@ -169,6 +181,8 @@ class Backtester:
                     if max_bars_in_trade is UNSET else max_bars_in_trade)
         pessimistic = cfg.backtest.intrabar_fill.lower().startswith("pess")
         next_open = cfg.backtest.entry_on_next_open
+        trail_mult = cfg.backtest.trail_atr_mult
+        be_at_r = cfg.backtest.breakeven_at_r
 
         def _bump(reason: str) -> None:
             skipped[reason] = skipped.get(reason, 0) + 1
@@ -197,28 +211,45 @@ class Backtester:
                     i, h[i], l[i], c[i], o[i], side, stop_px, tgt_px,
                     entry_i, max_bars, sig[i], pessimistic,
                 )
+                # NOTE: the stop used above is the one in force when the bar
+                # opened. Any ratchet below takes effect on the NEXT bar, so a
+                # bar's own high can never raise the stop that same bar's low
+                # then trades through - that would be an intrabar order we do
+                # not know.
                 if exit_px is not None:
                     fill = self._apply_slippage(exit_px, -side)
                     proceeds = units * fill
                     fee = max(abs(proceeds) * self.fee, self.min_comm)
                     cash += proceeds - fee
                     pnl = (fill - entry_px) * units - fee - entry_fee
-                    risk_dist = abs(entry_px - stop_px) if np.isfinite(stop_px) else np.nan
+                    risk_dist = (abs(entry_px - entry_stop)
+                                 if np.isfinite(entry_stop) else np.nan)
                     r_mult = (((fill - entry_px) * side) / risk_dist
                               if (risk_dist and np.isfinite(risk_dist) and risk_dist > 0) else np.nan)
                     trades.append(Trade(
                         symbol=symbol, side=side, entry_time=times[entry_i],
                         entry_price=entry_px, units=units, notional=abs(units) * entry_px,
-                        stop=stop_px, target=tgt_px, exit_time=times[i], exit_price=fill,
+                        stop=entry_stop, target=tgt_px, exit_time=times[i], exit_price=fill,
                         exit_reason=reason, pnl=pnl, fees=fee + entry_fee,
                         bars_held=i - entry_i, r_multiple=r_mult,
                         equity_at_entry=entry_equity, throttle=entry_throttle, tag=entry_tag,
                     ))
                     units, side, entry_px, stop_px, tgt_px = 0.0, 0, np.nan, np.nan, np.nan
                     entry_i, entry_tag = -1, ""
+                    entry_stop, best_px = np.nan, np.nan
                     equity_arr[i] = cash
                     pos_arr[i] = 0.0
                     exposure_arr[i] = 0.0
+                else:
+                    # still open: fold this bar into the trailing reference and
+                    # ratchet the stop for the next bar
+                    best_px = (max(best_px, h[i]) if side > 0
+                               else min(best_px, l[i]))
+                    stop_px = self._ratchet_stop(
+                        side, stop_px, entry_px, entry_stop, best_px, c[i],
+                        (atr_arr[i] if atr_arr is not None else None),
+                        trail_mult, be_at_r,
+                    )
 
             # ---------------- 3. open a new position --------------------------
             if units == 0 and i > 0:
@@ -254,6 +285,12 @@ class Backtester:
                                 units = res.units
                                 side = int(np.sign(want))
                                 entry_px, stop_px, tgt_px = entry, s_px, t_px
+                                entry_stop = s_px
+                                # the entry bar's own extreme is a valid trailing
+                                # reference only when we entered at its open
+                                best_px = ((max(entry, h[i]) if side > 0
+                                            else min(entry, l[i]))
+                                           if next_open else entry)
                                 entry_i = i
                                 entry_tag = str(tag[i - 1] if next_open else tag[i])
                                 entry_equity = equity_arr[i]
@@ -267,10 +304,11 @@ class Backtester:
             proceeds = units * fill
             fee = max(abs(proceeds) * self.fee, self.min_comm)
             cash += proceeds - fee
-            risk_dist = abs(entry_px - stop_px) if np.isfinite(stop_px) else np.nan
+            risk_dist = (abs(entry_px - entry_stop)
+                         if np.isfinite(entry_stop) else np.nan)
             trades.append(Trade(
                 symbol=symbol, side=side, entry_time=times[entry_i], entry_price=entry_px,
-                units=units, notional=abs(units) * entry_px, stop=stop_px, target=tgt_px,
+                units=units, notional=abs(units) * entry_px, stop=entry_stop, target=tgt_px,
                 exit_time=times[n - 1], exit_price=fill, exit_reason="end_of_data",
                 pnl=(fill - entry_px) * units - fee - entry_fee, fees=fee + entry_fee,
                 bars_held=n - 1 - entry_i,
@@ -353,16 +391,67 @@ class Backtester:
         mult = 2.0 if is_stop else 4.0
         return float(entry - side * mult * a) if is_stop else float(entry + side * mult * a)
 
+    @staticmethod
+    def _ratchet_stop(side: int, stop: float, entry_px: float, entry_stop: float,
+                      best_px: float, close: float, atr_val: Optional[float],
+                      trail_mult: Optional[float], be_at_r: Optional[float]) -> float:
+        """The stop to carry into the next bar. Never loosens, never invents a level.
+
+        Two optional rules, both off by default so an existing study keeps the
+        stop its signal chose:
+
+        *``breakeven_at_r``* - once the trade has run that many R in profit, move
+        the stop to the entry price. It converts a winner into a scratch instead
+        of letting it round-trip into a full loss, at the cost of being stopped
+        on the pullback that would have resumed.
+
+        *``trail_atr_mult``* - hang the stop that many ATRs behind the best price
+        since entry. A trend exit for a strategy whose fixed target caps the
+        right tail at exactly ``r_multiple``.
+
+        Both only ever move the stop in the trade's favour, and the result is
+        clamped to the bar's close: a stop beyond the market is not a resting
+        order, it is a market order that already filled.
+        """
+        if not np.isfinite(stop):
+            return stop
+        cand = stop
+        risk = abs(entry_px - entry_stop) if np.isfinite(entry_stop) else np.nan
+        if be_at_r and np.isfinite(risk) and risk > 0 and np.isfinite(best_px):
+            if side * (best_px - entry_px) >= be_at_r * risk:
+                cand = max(cand, entry_px) if side > 0 else min(cand, entry_px)
+        if (trail_mult and atr_val is not None and np.isfinite(atr_val)
+                and atr_val > 0 and np.isfinite(best_px)):
+            trail = best_px - side * trail_mult * atr_val
+            cand = max(cand, trail) if side > 0 else min(cand, trail)
+        if np.isfinite(close):
+            cand = min(cand, close) if side > 0 else max(cand, close)
+        return max(stop, cand) if side > 0 else min(stop, cand)
+
     def _check_exit(self, i: int, hi: float, lo: float, close: float, open_: float,
                     side: int, stop: float, target: float, entry_i: int,
                     max_bars: Optional[int], sig_now: float, pessimistic: bool
                     ) -> Tuple[Optional[float], str]:
-        """Decide whether this bar closes the position, and at what price."""
+        """Decide whether this bar closes the position, and at what price.
+
+        Stop fills are gap-aware. A resting stop is a market order once triggered,
+        so when the bar *opens* beyond it the fill is the open: the market gapped
+        past the level and never traded there. Returning the stop price on a gap
+        invents a fill nobody could have got, and on a limit-down open it is
+        fiction. Targets are deliberately left at the limit price - a limit fills
+        no worse than its level, so the conservative branch is the correct one.
+        """
         # +-inf is the explicit "no stop" / "no target" sentinel
         has_stop = np.isfinite(stop)
         has_target = np.isfinite(target)
         hit_stop = ((lo <= stop) if side > 0 else (hi >= stop)) if has_stop else False
         hit_target = ((hi >= target) if side > 0 else (lo <= target)) if has_target else False
+
+        if has_stop and np.isfinite(open_) and (open_ <= stop if side > 0 else open_ >= stop):
+            # Checked before the both-touched branch: the stop is triggered at the
+            # open, ahead of anything that happens intrabar, so a gap through the
+            # stop beats even an optimistic target fill on the same bar.
+            return float(open_), "stop_loss"
 
         if hit_stop and hit_target:
             # OHLC cannot tell us the intra-bar path; take the adverse branch

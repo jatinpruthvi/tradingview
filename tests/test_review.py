@@ -30,17 +30,26 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tvlab.screener.review import (OUTCOMES, SCORED_OUTCOMES, ScoredSuggestion,
-                                   review, score_one, summarise)
+from tvlab.screener.review import (
+    OUTCOMES,
+    SCORED_OUTCOMES,
+    ScoredSuggestion,
+    review,
+    score_one,
+    summarise,
+)
 
 
 def _bars(rows, start="2026-01-05"):
-    """rows: list of (high, low, close). Row 0 is the suggestion bar."""
+    """rows: (high, low, close) or (high, low, close, open). Row 0 is the suggestion
+    bar. The three-field form means a bar that opens at its close - the quiet case
+    most outcomes need; the four-field form exists so a gap can be described."""
     idx = pd.date_range(start, periods=len(rows), freq="D")
     return pd.DataFrame(
         {"high": [r[0] for r in rows], "low": [r[1] for r in rows],
          "close": [r[2] for r in rows],
-         "open": [r[2] for r in rows], "volume": [1.0] * len(rows)},
+         "open": [r[3] if len(r) > 3 else r[2] for r in rows],
+         "volume": [1.0] * len(rows)},
         index=idx)
 
 
@@ -83,6 +92,24 @@ def test_stop_hit_first_scores_a_loss_at_minus_one_r():
 def test_a_bar_touching_both_levels_resolves_to_the_stop():
     """Same convention as backtest/engine.py. OHLC cannot say which came first."""
     s = score_one(_entry(), _bars([_BAR0, (107.0, 97.0, 101.0)]), horizon_bars=90)
+    assert s.outcome == "stop_loss"
+    assert s.exit_price == pytest.approx(98.0)
+    assert s.r_multiple == pytest.approx(-1.0)
+
+
+def test_a_gap_through_the_stop_scores_at_the_open_not_the_stop():
+    """Same rule as backtest/engine.py. A journal that scored gaps at the stop would
+    report a flattering win rate that the backtester does not endorse."""
+    # opens at 94, well below the 98 stop, on the first bar after the suggestion
+    s = score_one(_entry(), _bars([_BAR0, (99.0, 92.0, 93.0, 94.0)]), horizon_bars=90)
+    assert s.outcome == "stop_loss"
+    assert s.exit_price == pytest.approx(94.0)
+    assert s.r_multiple == pytest.approx(-3.0)     # (94-100)/2
+    assert s.is_win is False
+
+
+def test_a_bar_that_only_dips_intrabar_still_scores_at_the_stop():
+    s = score_one(_entry(), _bars([_BAR0, (100.0, 97.5, 98.0, 99.5)]), horizon_bars=90)
     assert s.outcome == "stop_loss"
     assert s.exit_price == pytest.approx(98.0)
     assert s.r_multiple == pytest.approx(-1.0)

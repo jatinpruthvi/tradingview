@@ -26,8 +26,10 @@ Five limitations, each of which changes what the numbers mean:
    output.
 2. **Intrabar ambiguity is resolved pessimistically**, matching
    ``backtest/engine.py``: when one bar touches both the stop and the target, OHLC
-   cannot say which came first, so the stop is assumed. Using a different convention
-   here than in the backtester would make the two disagree about the same trades.
+   cannot say which came first, so the stop is assumed. A gap through the stop fills
+   at the bar's **open**, not at the stop price, for the same reason as the engine:
+   the level was never traded. Using a different convention here than in the
+   backtester would make the two disagree about the same trades.
 3. **Open suggestions are neither wins nor losses.** An idea whose horizon has not
    elapsed is reported as ``open`` and excluded from the win rate. Counting it as a
    loss would punish a swing trade for still running; counting it as a win would be
@@ -336,6 +338,8 @@ def score_one(
     hi = post["high"].to_numpy(dtype="float64")
     lo = post["low"].to_numpy(dtype="float64")
     cl = post["close"].to_numpy(dtype="float64")
+    op = (post["open"].to_numpy(dtype="float64") if "open" in post.columns
+          else np.full(len(post), np.nan))
     idx = post.index
 
     long_ = s.side == "long"
@@ -353,12 +357,19 @@ def score_one(
 
         hit_stop = (lo[i] <= s.stop) if long_ else (hi[i] >= s.stop)
         hit_target = bool(has_target) and ((hi[i] >= s.target) if long_ else (lo[i] <= s.target))
+        # A stop is a market order once triggered, and the bar's open comes first.
+        # If it opens through the level the fill is the open; matching
+        # backtest/engine.py exactly here matters, because a reviewer that scored
+        # gaps at the stop would flatter the journal relative to the backtester.
+        gap_through = bool(np.isfinite(op[i])) and (
+            op[i] <= s.stop if long_ else op[i] >= s.stop)
+        stop_fill = float(op[i]) if gap_through else float(s.stop)
         if hit_stop and hit_target:
             # Same convention as backtest/engine.py: OHLC cannot say which came
             # first inside one bar, so take the adverse branch.
-            s.outcome, s.exit_price = "stop_loss", float(s.stop)
+            s.outcome, s.exit_price = "stop_loss", stop_fill
         elif hit_stop:
-            s.outcome, s.exit_price = "stop_loss", float(s.stop)
+            s.outcome, s.exit_price = "stop_loss", stop_fill
         elif hit_target:
             s.outcome, s.exit_price = "take_profit", float(s.target)
         else:

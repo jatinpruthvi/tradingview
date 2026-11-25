@@ -34,6 +34,14 @@ def set_wide_bar(df, i, high, low):
     return df
 
 
+def set_gap_bar(df, i, open_, high, low):
+    """Move a bar's open through a level, the way an overnight gap does."""
+    df.loc[df.index[i], "open"] = open_
+    df.loc[df.index[i], "high"] = high
+    df.loc[df.index[i], "low"] = low
+    return df
+
+
 # stops/targets must respect risk.min_stop_distance_pct (0.15%) and
 # risk.max_stop_distance_pct (25%): 2% and 4% are comfortably inside both.
 STOP = 98.0
@@ -84,6 +92,72 @@ def test_pessimistic_intrabar_fill_takes_the_stop(cfg):
 
     opt = cfg.merge({"backtest.intrabar_fill": "optimistic"})
     assert Backtester(opt).run(df, sig, symbol="T").trades.iloc[0]["exit_reason"] == "take_profit"
+
+
+def test_a_gap_through_the_stop_fills_at_the_open(cfg):
+    """A stop is a market order once triggered: if the bar OPENS below it, the
+    market never traded at the stop. Filling there invents a price nobody could
+    have got - and on a limit-down open it is pure fiction."""
+    df = flat_prices(60, 100.0, band=0.001)
+    sig = blank_signals(df)
+    sig.loc[df.index[20], "signal"] = 1.0        # entered at bar 21's open
+    sig.loc[df.index[20], "stop"] = STOP
+    sig.loc[df.index[20], "target"] = TARGET
+    set_gap_bar(df, 22, 94.0, 95.0, 92.0)        # opens 4 below a 98 stop
+
+    t = Backtester(cfg).run(df, sig, symbol="T").trades.iloc[0]
+    slip = cfg.costs.slippage_bps / 1e4
+    assert t["exit_reason"] == "stop_loss"
+    assert t["exit_price"] == pytest.approx(94.0 * (1 - slip)), \
+        "filled at the open, with adverse slippage - not at the 98 stop"
+    assert t["r_multiple"] < -2.0, "a 4-point gap on a 2-point risk is worse than -1R"
+
+
+def test_a_gap_through_the_stop_beats_an_optimistic_target(cfg):
+    """The stop triggers at the open, before anything intrabar. A bar that gaps
+    through the stop and later trades up through the target was already flat."""
+    df = flat_prices(60, 100.0, band=0.001)
+    sig = blank_signals(df)
+    sig.loc[df.index[20], "signal"] = 1.0
+    sig.loc[df.index[20], "stop"] = STOP
+    sig.loc[df.index[20], "target"] = TARGET
+    set_gap_bar(df, 22, 94.0, 106.0, 93.0)       # opens through the stop, then rallies
+
+    opt = cfg.merge({"backtest.intrabar_fill": "optimistic"})
+    t = Backtester(opt).run(df, sig, symbol="T").trades.iloc[0]
+    slip = cfg.costs.slippage_bps / 1e4
+    assert t["exit_reason"] == "stop_loss"
+    assert t["exit_price"] == pytest.approx(94.0 * (1 - slip))
+
+
+def test_a_bar_that_only_dips_intrabar_still_fills_at_the_stop(cfg):
+    """The gap rule must not become 'fill at the open whenever the stop is hit'."""
+    df = flat_prices(60, 100.0, band=0.001)
+    sig = blank_signals(df)
+    sig.loc[df.index[20], "signal"] = 1.0
+    sig.loc[df.index[20], "stop"] = STOP
+    sig.loc[df.index[20], "target"] = TARGET
+    set_gap_bar(df, 22, 100.0, 101.0, 97.0)      # opens above, dips through the stop
+
+    t = Backtester(cfg).run(df, sig, symbol="T").trades.iloc[0]
+    slip = cfg.costs.slippage_bps / 1e4
+    assert t["exit_price"] == pytest.approx(STOP * (1 - slip))
+
+
+def test_a_short_gapped_through_its_stop_fills_at_the_open(cfg):
+    """Symmetric: a gap UP through a short's stop fills above it, not at it."""
+    df = flat_prices(60, 100.0, band=0.001)
+    sig = blank_signals(df)
+    sig.loc[df.index[20], "signal"] = -1.0
+    sig.loc[df.index[20], "stop"] = 102.0
+    sig.loc[df.index[20], "target"] = 96.0
+    set_gap_bar(df, 22, 105.0, 106.0, 104.0)
+
+    t = Backtester(cfg).run(df, sig, symbol="T").trades.iloc[0]
+    slip = cfg.costs.slippage_bps / 1e4
+    assert t["exit_reason"] == "stop_loss"
+    assert t["exit_price"] == pytest.approx(105.0 * (1 + slip))
+    assert t["r_multiple"] < -1.0
 
 
 def test_shorts_are_not_silently_rejected(cfg):
@@ -234,3 +308,95 @@ def test_r_multiple_is_consistent_with_stop_distance(cfg):
     # entry slippage widens the realised risk (98 vs a 100.02 fill), so the
     # realised R lands just under the clean +3R. Fees do not enter r_multiple.
     assert 2.80 < t["r_multiple"] < 3.00, t["r_multiple"]
+
+
+# --------------------------------------------------------------- trailing exits
+# Both rules are opt-in. Their whole value is that they can only ever move the
+# stop in the trade's favour, and that the move lands on the NEXT bar - a bar
+# that raises the stop with its own high and then gets stopped by its own low
+# would be reading an intrabar order nobody knows.
+
+def _atr(df, value=1.0):
+    return pd.Series(value, index=df.index, name="atr")
+
+
+def test_trailing_stop_follows_the_best_price_and_cuts_the_trade_early(cfg):
+    """A trail replaces the fixed stop once price has run, so the round trip
+    ends at the trail instead of giving the whole move back to the original stop."""
+    df = flat_prices(60, 100.0, band=0.002)
+    # entry lands on bar 11's open; bar 12 is the first managed bar
+    set_wide_bar(df, 12, 108.0, 100.0)            # best = 108, trail -> 106
+    df.loc[df.index[12], "close"] = 107.0
+    set_gap_bar(df, 13, 106.5, 107.0, 105.0)      # opens above the trail, dips through it
+
+    sig = blank_signals(df)
+    sig.loc[df.index[10], "signal"] = 1.0
+    sig.loc[df.index[10], "stop"] = STOP          # 98.0, risk 2.0
+    sig.loc[df.index[10], "target"] = 120.0       # far enough not to fire
+
+    trail = cfg.merge({"backtest.trail_atr_mult": 2.0})
+    res = Backtester(trail).run(df, sig, symbol="T", atr=_atr(df, 1.0))
+    t = res.trades.iloc[0]
+    assert t["exit_reason"] == "stop_loss"
+    assert t["exit_time"] == df.index[13]
+    # trail after bar 12 = 108 - 2*1 = 106; exit at that level less exit slippage
+    assert 105.9 < t["exit_price"] < 106.0, t["exit_price"]
+    # R is measured against the ORIGINAL 2.0 of risk, so a trailed winner is > 0
+    assert t["r_multiple"] > 2.5, t["r_multiple"]
+    assert t["stop"] == STOP                     # the risk basis, not the trail
+
+    # the same bars without the trail never reach 98, so nothing is stopped
+    base = Backtester(cfg).run(df, sig, symbol="T")
+    assert base.trades.iloc[0]["exit_reason"] != "stop_loss"
+
+
+def test_breakeven_moves_the_stop_to_entry_and_R_uses_the_original_risk(cfg):
+    """If R were measured against the moved stop, the denominator would collapse
+    to zero and every breakeven exit would report an enormous R."""
+    df = flat_prices(60, 100.0, band=0.002)
+    set_wide_bar(df, 12, 102.5, 100.0)            # +1R reached
+    df.loc[df.index[12], "close"] = 102.0
+    set_gap_bar(df, 13, 101.5, 101.8, 99.5)
+
+    sig = blank_signals(df)
+    sig.loc[df.index[10], "signal"] = 1.0
+    sig.loc[df.index[10], "stop"] = STOP          # risk 2.0 => 1R at 102
+    sig.loc[df.index[10], "target"] = 120.0
+
+    be = cfg.merge({"backtest.breakeven_at_r": 1.0})
+    res = Backtester(be).run(df, sig, symbol="T")
+    t = res.trades.iloc[0]
+    assert t["exit_reason"] == "stop_loss"
+    assert t["exit_time"] == df.index[13]
+    assert 99.9 < t["exit_price"] < 100.1, t["exit_price"]     # stopped at entry
+    assert -0.1 < t["r_multiple"] < 0.1, t["r_multiple"]       # ~0R, not ~ +inf
+    assert t["stop"] == STOP
+
+
+def test_a_ratcheted_stop_is_not_applied_to_the_bar_that_raised_it(cfg):
+    """One bar raises the trail with its own high and dips below it with its own
+    low. Applying the trail inside that bar would exit at 106 on an intrabar path
+    we cannot know; the stop in force at the open is 98, and 99 never touches it."""
+    df = flat_prices(60, 100.0, band=0.002)
+    # ONE bar: high 108 would trail the stop to 106, low 99 would then hit it -
+    # but 99 is above the only stop in force when the bar opened, at 98
+    set_wide_bar(df, 12, 108.0, 99.0)
+    df.loc[df.index[12], "close"] = 107.0
+
+    sig = blank_signals(df)
+    sig.loc[df.index[10], "signal"] = 1.0
+    sig.loc[df.index[10], "stop"] = STOP
+    sig.loc[df.index[10], "target"] = 120.0
+
+    trail = cfg.merge({"backtest.trail_atr_mult": 2.0})
+    res = Backtester(trail).run(df, sig, symbol="T", atr=_atr(df, 1.0))
+    t = res.trades.iloc[0]
+    assert t["exit_time"] != df.index[12], "the bar raised and hit its own trail"
+    assert t["exit_time"] > df.index[12]
+
+
+def test_trailing_is_off_unless_configured(cfg):
+    """Default config must keep the stop the signal chose, or every study
+    already published would silently change."""
+    assert cfg.backtest.trail_atr_mult is None
+    assert cfg.backtest.breakeven_at_r is None
