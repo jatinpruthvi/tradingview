@@ -212,7 +212,7 @@ the self-check that it is the same 3,510 trades:
 | all breakouts (baseline) | 3,510 | +13.4 | -2.6 | 3.24 | -1.60 % |
 | gate: bottom 40 % by delivery % | 1,372 | +16.6 | **+0.6** | 2.55 | +0.30 % |
 | gate: top 40 % by delivery % | 1,387 | +13.5 | -2.5 | 2.64 | -1.53 % |
-| size by forecast range | 3,510 | +13.7 | -1.6 | 2.91 | -1.02 % |
+| size by forecast range | 3,510 | +14.4 | -1.6 | 2.91 | -1.02 % |
 
 Quintile ladder (net bp/day): Q1 +1.2, Q2 +0.6, Q3 -7.4, Q4 -4.0, Q5 -1.2.
 
@@ -239,10 +239,39 @@ entire effect under test is 3 bp. So this is not "delivery is useless" - it is
 response. Five years (~1,250 sessions) would resolve about 1.8 bp/day at the same
 confidence, which is the data purchase in Tier 1 item 3 rather than a new filter.
 
-Caveats on top: eight variants were tried (the DSR penalty applies to all of
-them), the cross-sectional and time-series forms disagree, and 60 % of the
-trading days in the gated subset are the same 60 days as the baseline, so the
-comparison is paired rather than independent.
+**Cost sweep: where each variant turns positive.** Subtracting a constant cost
+from every session shifts the mean by exactly that cost and leaves the dispersion
+alone, so break-even cost is simply the gross edge per day - and the t-statistic
+falls in proportion to the shrink. Net bp per session, same trades re-priced
+(no new trials):
+
+| round trip bp | all breakouts | gate bottom 40 % | gate top 40 % | size by forecast |
+|---:|---:|---:|---:|---:|
+| 6 | +7.4 | +10.6 | +7.5 | +8.4 |
+| 8 | +5.4 | +8.6 | +5.5 | +6.4 |
+| 10 | +3.4 | +6.6 | +3.5 | +4.4 |
+| 12 | +1.4 | +4.6 | +1.5 | +2.4 |
+| 14 | -0.6 | +2.6 | -0.5 | +0.4 |
+| 16 | -2.6 | +0.6 | -2.5 | -1.6 |
+| 18 | -4.6 | -1.4 | -4.5 | -3.6 |
+| 20 | -6.6 | -3.4 | -6.5 | -5.6 |
+| 24 | -10.6 | -7.4 | -10.5 | -9.6 |
+
+Break-even is 13.4 bp ungated, 16.6 bp with the bottom-40 % gate, 13.5 bp with the
+top-40 % gate and 14.4 bp when sized by the forecast - so the gate buys 3.3 bp of
+cost headroom and nothing more. Against the 25-30 bp real delivery round trip in
+Tier 1 item 1, every variant is still negative at 24 bp, the best of them by 7.4
+bp per session. The sweep also kills the tempting "if only execution were cheaper"
+reading: at 6 bp the gate nets +10.6 bp per day with **t = 1.63**, and the
+largest positive t anywhere in the table is 1.79. Cheap execution would make
+ORB look positive, not make it significant - the significant cell is the
+negative one, at 24 bp (all breakouts, t = -2.58).
+
+Caveats on top: eight variants were tried, so the multiple-testing penalty
+applies to all of them; the cross-sectional and time-series forms disagree on
+the sign; and every row trades the same 60 sessions, so the comparison is
+paired - the gate cannot lose for lack of overlap, and it cannot claim an
+independent sample either.
 
 ---
 
