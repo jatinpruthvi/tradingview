@@ -190,9 +190,9 @@ accumulative days and is thin on churny ones.
 daily. It is a forecast of the session's expected range, which is the missing
 input to two decisions this project makes badly today: whether a range-dependent
 rule has enough range to pay its 16 bp (ORB's opening range has to be wide enough
-to clear it), and how large the position should be. That is the next measurement,
-and it needs 5m bars for the opening range, so it inherits the 60-day cap until a
-longer intraday source is wired in.
+to clear it), and how large the position should be. That measurement has now been run on
+the 5m sample already in the repo - see **Does it rescue ORB?** below - and it
+does not clear the bar.
 
 **Caveats.** One year, one regime; the universe is *today's* most-liquid 60 names
 (survivorship and liquidity bias); prices are Yahoo-adjusted while delivery comes
@@ -201,6 +201,48 @@ bar-for-bar; "range" is the full-session high-low and includes the opening range
 ORB actually trades; and 100 % coverage is a property of these 60 liquid names,
 not of NSE.
 
+**Does it rescue ORB?** (measured on the existing 5m sample; `src/` unchanged).
+60 names x 60 sessions, 3,510 breakouts, 98 % of them matched to a previous
+session's delivery row. The trade list is imported from the ORB study rather than
+re-derived, and the baseline row reproduces the documented one exactly, which is
+the self-check that it is the same 3,510 trades:
+
+| variant | trades | gross bp/day | net bp/day | t | total net |
+|---|---:|---:|---:|---:|---:|
+| all breakouts (baseline) | 3,510 | +13.4 | -2.6 | 3.24 | -1.60 % |
+| gate: bottom 40 % by delivery % | 1,372 | +16.6 | **+0.6** | 2.55 | +0.30 % |
+| gate: top 40 % by delivery % | 1,387 | +13.5 | -2.5 | 2.64 | -1.53 % |
+| size by forecast range | 3,510 | +13.7 | -1.6 | 2.91 | -1.02 % |
+
+Quintile ladder (net bp/day): Q1 +1.2, Q2 +0.6, Q3 -7.4, Q4 -4.0, Q5 -1.2.
+
+**The mechanism is real and it replicates.** Inside the 5m sample, yesterday's
+delivery quintile sorts the *opening* range monotonically - 173 / 136 / 113 /
+100 / 93 bp, IC -0.41 - so the gate does reach the variable it claims to. ORB
+also only pays when that range is wide: the widest realised opening-range
+quartile is +2.8 bp per trade and the other three are -5.0 / -2.9 / -5.3. Wide
+opening ranges are 25 % of trades.
+
+**The translation to P&L does not hold.** The best gate cell is +0.6 bp/day
+against -2.6 for everything, i.e. a 3.2 bp/day improvement that buys break-even
+and nothing more. Three things say it is not a real rescue. The middle quintiles
+are non-monotone (Q3 is the worst cell in the table). The *time-series* form of
+the same idea - is this name's delivery low for itself, over its last month? -
+points the opposite way: +1.0 bp/day when it is high (t=3.06) against -1.9 when
+low. And sizing by the forecast moves -2.6 to -1.6 bp while *worsening* the
+drawdown (-3.17 % to -3.55 %), which is the wrong trade to make for 1 bp.
+
+**Resolution, not conviction, is the binding constraint.** 60 sessions resolve
+8.2 bp/day at t=2 on the full sample and 13.1 bp/day on the gated subset. The
+entire effect under test is 3 bp. So this is not "delivery is useless" - it is
+"this sample cannot see it", which is a different sentence and needs a different
+response. Five years (~1,250 sessions) would resolve about 1.8 bp/day at the same
+confidence, which is the data purchase in Tier 1 item 3 rather than a new filter.
+
+Caveats on top: eight variants were tried (the DSR penalty applies to all of
+them), the cross-sectional and time-series forms disagree, and 60 % of the
+trading days in the gated subset are the same 60 days as the baseline, so the
+comparison is paired rather than independent.
 
 ---
 
@@ -292,8 +334,10 @@ drift given up, t=1.56), and the equal-weight basket loses to cost at both clock
   existing adjusted price series by session date, never forward-fills a missing
   bhavcopy, and reports the matched share in `attrs`. 17 tests, including the
   18:30-UTC date stamp and the duplicate `T0` rows that a naive join reads as
-  two sessions per day. Nothing in `strategy/` reads it yet: see the range
-  finding above for why, and what would have to be built first.
+  two sessions per day. Nothing in `strategy/` reads it yet, and the measurement above says it
+  should stay that way: on this 60-session sample the gate reaches break-even,
+  which is below what the sample can resolve. See the range finding above for
+  what would have to be built first.
 
 Nothing in Tier 2 or Tier 3 is implemented. That is deliberate, and the
 measurement of the two exit rules is the argument for it.
