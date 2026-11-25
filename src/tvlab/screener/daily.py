@@ -416,7 +416,16 @@ def _apply_study(b: DailyBriefing, study: Optional[Dict[str, Any]]) -> None:
     if study.get("status") != "ok":
         b.study_verdict = None
         b.study_checks = None
-        b.notes.append(f"study report unreadable ({study.get('status')})")
+        # A study that ran and took no trades is a *different* fact from a report
+        # that cannot be parsed, and they have opposite remedies: widen the
+        # universe versus re-run the study. Reporting both as "unreadable" told
+        # the reader to re-run something that had already given its answer.
+        status = study.get("status")
+        if status == "no_trades":
+            b.notes.append("the last study took no trades, so there is no measured "
+                           "win rate for this configuration")
+        else:
+            b.notes.append(f"study report unreadable ({status})")
         return
     b.study_verdict = study.get("verdict")
     if b.study_verdict and b.study_verdict not in KNOWN_VERDICTS:

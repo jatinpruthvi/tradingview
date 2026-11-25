@@ -24,7 +24,11 @@ universe:
   - TMPV.NS
   - BAJFINANCE.NS
   min_quote_volume: 1000000
-  max_symbols: 12
+  # 0 = do not cap a universe built from the data source. `--data-source nse`
+  # enumerates NIFTY 500 plus every F&O security (~500 names) and screens all of
+  # them; capping here at 12 is what made a full-market scan report "scanned 12".
+  # Use `--max-symbols N` on the command line for a quicker pass.
+  max_symbols: 0
   nse_index: NIFTY 500   # --data-source nse pulls this index's members in one call;
                          # the 12 symbols above are the offline/synthetic fallback
 risk:

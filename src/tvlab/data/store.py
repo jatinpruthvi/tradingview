@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -107,13 +108,24 @@ class DataStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._sources: Dict[str, object] = {}
         self._mem: Dict[str, pd.DataFrame] = {}
+        # A universe scan fetches symbols concurrently, so adapter construction and
+        # the in-memory cache are shared across threads. Building two adapters is
+        # merely wasteful, but two threads writing the same parquet path is not: the
+        # lock plus the atomic replace in ohlcv() keeps a half-written file from ever
+        # being the thing the next run reads.
+        self._lock = threading.RLock()
 
     # ---------------------------------------------------------------- sources
     def source(self, name: Optional[str] = None):
         """Lazily build (and memoise) a data source adapter by name."""
         name = (name or self.cfg.data.source).lower()
-        if name in self._sources:
-            return self._sources[name]
+        with self._lock:
+            if name in self._sources:
+                return self._sources[name]
+            return self._build_source(name)
+
+    def _build_source(self, name: str):
+        """Construct one adapter. Callers hold ``_lock``."""
 
         if name == "synthetic":
             src = _SyntheticAdapter(self.cfg)
@@ -164,15 +176,19 @@ class DataStore:
         end = end or self.cfg.backtest.end
 
         key = self._cache_key(symbol, timeframe, start, end, limit, source)
-        if use_cache and key in self._mem:
-            return self._mem[key].copy()
+        if use_cache:
+            with self._lock:
+                cached = self._mem.get(key)
+            if cached is not None:
+                return cached.copy()
 
         path = self.root / f"{key}.parquet"
         if use_cache and path.exists():
             try:
                 df = pd.read_parquet(path)
                 df.index = pd.to_datetime(df.index, utc=True)
-                self._mem[key] = df
+                with self._lock:
+                    self._mem[key] = df
                 log.debug("cache hit %s", path.name)
                 return df.copy()
             except Exception as exc:  # noqa: BLE001
@@ -192,10 +208,15 @@ class DataStore:
         df.attrs["timeframe"] = timeframe
         df.attrs["source"] = getattr(src, "name", source or self.cfg.data.source)
 
-        self._mem[key] = df
+        with self._lock:
+            self._mem[key] = df
         if use_cache:
             try:
-                df.to_parquet(path)
+                # Write then rename: a concurrent reader only ever sees a complete
+                # file, and a crash mid-write leaves no half parquet to be trusted.
+                tmp = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+                df.to_parquet(tmp)
+                tmp.replace(path)
             except Exception as exc:  # noqa: BLE001 - pyarrow optional
                 log.debug("parquet cache write skipped (%s)", exc)
         return df.copy()
@@ -368,8 +389,48 @@ class DataStore:
         for p in self.root.glob("*.parquet"):
             p.unlink(missing_ok=True)
             n += 1
-        self._mem.clear()
+        with self._lock:
+            self._mem.clear()
         return n
+
+    # --------------------------------------------------------------- universe
+    def list_symbols(self, prefer_source: bool = True) -> List[str]:
+        """The tradeable universe: what the *source* lists, else the config list.
+
+        A market config's ``symbols`` is a fallback for offline work, not a
+        statement about the exchange. The Indian profile ships 12 large caps and an
+        ``nse_index``; NSE itself lists 500+ names. Returning the 12 while the
+        configured source can enumerate the rest is how a screen reports having
+        looked at a market it never looked at.
+
+        Sources that cannot enumerate (yfinance, yahoo_chart) raise from
+        ``list_symbols``; that is caught in :meth:`universe` and the config list is
+        used, so a source without a listing endpoint is not an error - it is a
+        fallback.
+        """
+        return self.universe(prefer_source=prefer_source)[0]
+
+    def universe(self, prefer_source: bool = True) -> Tuple[List[str], str]:
+        """``(symbols, origin)`` where origin is ``"source"`` or ``"config"``.
+
+        The origin is returned rather than inferred by the caller: a caller that
+        guesses "the source listed these" by comparing lengths gets it wrong on the
+        day the two happen to agree, and would then report a source-backed universe
+        that was really the fallback list.
+        """
+        if prefer_source:
+            try:
+                src = self.source()
+                lister = getattr(src, "list_symbols", None)
+                if lister is not None:
+                    listed = [s for s in lister() if s]
+                    if listed:
+                        return listed, "source"
+            except Exception as exc:  # noqa: BLE001 - a listing gap is not a data outage
+                log.warning("could not list symbols from %s (%s); using config symbols",
+                            self.cfg.data.source, exc)
+        syms = list(self.cfg.universe.symbols)
+        return (syms or list(DEFAULT_BASKET)), "config"
 
 
 class _SyntheticAdapter:

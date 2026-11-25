@@ -44,8 +44,10 @@ from ..indicators.smc import smc_features
 from ..indicators.technical import adx, atr, ema, rsi, supertrend
 from ..pipeline import build_strategy, effective_config, run_study
 from ..screener.daily import journal_path, read_journal
+from ..screener.universe import MODES, resolve_universe
 from ..strategy import available as available_strategies
 from ..strategy.base import trend_filter
+from .jobs import JobRunner, Progress
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +77,213 @@ def _json_safe(o: Any) -> Any:
     if isinstance(o, (pd.Series,)):
         return _json_safe(o.to_dict())
     return o
+
+
+#: How many concurrent symbol fetches a dashboard scan uses when the request does
+#: not say otherwise. The CLI's default, because the dashboard's "full NSE scan"
+#: is the CLI's command with a table around it: serially that is ~20 minutes and
+#: the button would look broken.
+DEFAULT_WORKERS = 8
+
+
+def _opt_int(v: Any) -> Optional[int]:
+    """Query-string ints arrive as text, JSON ones as numbers, absent as None."""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scan_progress(progress: Optional[Progress]) -> Optional[Any]:
+    """Adapt a job's Progress handle to ``scan_universe``'s callback.
+
+    The bar comes from ``advance``; the sentence beside it is set by the caller
+    once ("scanning 502 symbol(s)"). Repeating the counts in both places printed
+    ``355/502 · 355/502`` beside the bar, which reads like two different numbers.
+    """
+    return None if progress is None else progress.advance
+
+
+def _measured(cfg: AppConfig) -> Optional[Dict[str, Any]]:
+    """The last study's measured win rate, or None.
+
+    A missing report is not an API failure and not a zero: :mod:`tvlab.cli` is the
+    one place that decides what "measured" means, including the difference between
+    a study that took no trades and a report that cannot be parsed.
+    """
+    try:
+        from ..cli import _measured_win_rate
+
+        return _measured_win_rate(cfg, cfg.strategy.name)
+    except Exception as exc:  # noqa: BLE001 - a missing report is not an API failure
+        log.debug("no measured win rate available: %s", exc)
+        return None
+
+
+def _scan_payload(cfg: AppConfig, *, symbols=None, universe="auto", max_symbols=None,
+                  timeframe=None, top=None, trendlines=False,
+                  workers=DEFAULT_WORKERS,
+                  progress: Optional[Progress] = None) -> Dict[str, Any]:
+    """Current setup state across the universe - the ``tvlab scan`` read-out.
+
+    ``top`` truncates the *table*, never the scan. It used to slice ``syms``, so
+    asking for 20 rows quietly turned a 502-name screen into a 40-name one - the
+    exact silent-coverage bug the CLI had, reproduced in the dashboard.
+    """
+    from ..screener import SCAN_BARS, rank, scan_universe, summarize
+
+    c = cfg
+    if timeframe:
+        c = c.merge({"timeframe.execution": timeframe})
+    syms, universe_note = resolve_universe(c, symbols, universe, max_symbols)
+    if progress is not None:
+        progress.set_total(len(syms))
+        progress.note(f"scanning {len(syms)} symbol(s)")
+
+    strat = build_strategy(c)
+    store = DataStore(c)
+    rows, errors = scan_universe(store, c, syms, strat=strat,
+                                 timeframe=c.timeframe.execution, bars=SCAN_BARS,
+                                 with_trendlines=trendlines, workers=workers,
+                                 progress=_scan_progress(progress))
+
+    payload = []
+    for r in rank(rows, live_only=False, fee_bps=c.costs.fee_bps,
+                  slippage_bps=c.costs.slippage_bps,
+                  min_stop_distance_pct=c.risk.min_stop_distance_pct):
+        d = r.to_dict()
+        # `rr` is the key the frontend has always read; keep it as an alias
+        # rather than forcing a coordinated change in two places.
+        d["rr"] = d.pop("reward_risk", None)
+        payload.append(d)
+
+    s = summarize(rows, errors)
+    shown = payload[:top] if top else payload
+    return _json_safe({
+        "rows": shown,
+        "n_rows": len(payload),
+        "n_shown": len(shown),
+        "errors": [{"symbol": k, "error": v} for k, v in errors.items()],
+        "strategy": c.strategy.name,
+        "timeframe": c.timeframe.execution,
+        "live_signals": s["live"],
+        "summary": s,
+        "universe": universe_note,
+    })
+
+
+def _suggest_payload(cfg: AppConfig, *, symbols=None, universe="auto", max_symbols=None,
+                     timeframe=None, top=None, trendlines=False,
+                     max_breakeven=0.60, workers=DEFAULT_WORKERS,
+                     progress: Optional[Progress] = None) -> Dict[str, Any]:
+    """Ranked shortlist, best risk:reward *after costs* first - ``tvlab suggest``."""
+    from ..screener import SCAN_BARS, scan_universe
+    from ..screener.quality import suggest as build_suggestions
+
+    c = cfg
+    if timeframe:
+        c = c.merge({"timeframe.execution": timeframe})
+    syms, universe_note = resolve_universe(c, symbols, universe, max_symbols)
+    if progress is not None:
+        progress.set_total(len(syms))
+        progress.note(f"scanning {len(syms)} symbol(s)")
+
+    store = DataStore(c)
+    rows, errors = scan_universe(store, c, syms, strat=build_strategy(c),
+                                 timeframe=c.timeframe.execution, bars=SCAN_BARS,
+                                 with_trendlines=trendlines, workers=workers,
+                                 progress=_scan_progress(progress))
+    if progress is not None:
+        progress.note(f"ranking {len(rows)} row(s) after costs")
+    res = build_suggestions(rows, fee_bps=c.costs.fee_bps, slippage_bps=c.costs.slippage_bps,
+                            min_stop_distance_pct=c.risk.min_stop_distance_pct,
+                            max_breakeven=max_breakeven,
+                            allow_short=c.risk.allow_short)
+
+    candidates = res["candidates"][:top] if top else res["candidates"]
+    return _json_safe({
+        "candidates": [x.to_dict() for x in candidates],
+        "rejected": res["rejected"],
+        "unscoreable": res["unscoreable"],
+        "shorts_skipped": res["shorts_skipped"],
+        "n_shorts_skipped": res["n_shorts_skipped"],
+        "n_candidates": res["n_candidates"],
+        "n_rejected": res["n_rejected"],
+        "n_shown": len(candidates),
+        "round_trip_cost_bps": res["round_trip_cost_bps"],
+        "max_breakeven": res["max_breakeven"],
+        "weights": res["weights"],
+        "measured": _measured(c),
+        "strategy": c.strategy.name,
+        "timeframe": c.timeframe.execution,
+        "market": c.universe.market,
+        "scanned": len(rows),
+        "errors": [{"symbol": k, "error": v} for k, v in errors.items()],
+        "universe": universe_note,
+        "note": ("A ranked shortlist is not a recommendation. Nothing here has been "
+                 "validated as profitable; `tvlab study` decides that, and its current "
+                 "verdict is NOT VALIDATED."),
+    })
+
+
+def _briefing_payload(cfg: AppConfig, *, symbols=None, universe="auto", max_symbols=None,
+                      timeframe=None, top=10, trendlines=False,
+                      max_breakeven=0.60, fundamentals=True, journal=False,
+                      workers=DEFAULT_WORKERS,
+                      progress: Optional[Progress] = None) -> Dict[str, Any]:
+    """The daily briefing: the same composition ``tvlab daily`` runs."""
+    from ..screener import SCAN_BARS, scan_universe
+    from ..screener.daily import append_journal, build_briefing
+
+    c = cfg
+    if timeframe:
+        c = c.merge({"timeframe.execution": timeframe})
+    syms, universe_note = resolve_universe(c, symbols, universe, max_symbols)
+    if progress is not None:
+        progress.set_total(len(syms))
+        progress.note(f"scanning {len(syms)} symbol(s)")
+
+    store = DataStore(c)
+    rows, errors = scan_universe(store, c, syms, strat=build_strategy(c),
+                                 timeframe=c.timeframe.execution, bars=SCAN_BARS,
+                                 with_trendlines=trendlines, workers=workers,
+                                 progress=_scan_progress(progress))
+
+    snaps, fund_error = None, None
+    want = bool(fundamentals and c.fundamentals.enabled)
+    if want and c.universe.market not in FUNDAMENTAL_MARKETS:
+        fund_error = (f"market '{c.universe.market}' has no earnings, book value or "
+                      f"analyst coverage, so there is nothing to gate on")
+    elif want and rows:
+        if progress is not None:
+            progress.note(f"fetching fundamentals for {len(rows)} symbol(s)")
+        try:
+            snaps = fetch_fundamentals([r.symbol for r in rows],
+                                       market=c.universe.market,
+                                       max_symbols=max(len(rows), 200),
+                                       extra_fields=c.fundamentals.extra_fields)
+        except Exception as exc:  # noqa: BLE001 - an outage is a coverage fact
+            fund_error = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+    if progress is not None:
+        progress.note("ranking and gating")
+    b = build_briefing(rows, errors, c, snaps=snaps, study=_measured(c),
+                       max_breakeven=max_breakeven, top=top,
+                       fundamentals_error=fund_error)
+    if journal:
+        try:
+            append_journal(b, REPO_ROOT / c.output.dir)
+        except Exception as exc:  # noqa: BLE001 - never fail the briefing on this
+            log.warning("could not journal the daily run: %s", exc)
+
+    payload = b.to_dict()
+    payload["fundamentals_error"] = fund_error
+    payload["journal_path"] = str(journal_path(REPO_ROOT / c.output.dir))
+    payload["recent_runs"] = read_journal(REPO_ROOT / c.output.dir, limit=10)
+    payload["universe"] = universe_note
+    return _json_safe(payload)
 
 
 class AppState:
@@ -146,11 +355,21 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             "data_source": c.data.source,
             "quote_currency": c.universe.quote_currency,
             "symbols": list(c.universe.symbols),
+            # The configured list is a fallback for offline work, not a statement
+            # about the exchange: NSE lists 502 names while the config ships 12.
+            "universe": {"modes": list(MODES),
+                         "config_symbols": len(c.universe.symbols),
+                         "max_symbols": c.universe.max_symbols},
+            "workers": DEFAULT_WORKERS,
             "available": {
                 "markets": sorted(p.stem for p in (CONFIG_DIR / "markets").glob("*.yaml")),
                 "styles": sorted(p.stem for p in (CONFIG_DIR / "styles").glob("*.yaml")),
                 "strategies": available_strategies(),
-                "data_sources": ["synthetic", "csv", "ccxt", "yfinance", "tvscreener"],
+                # Every source the CLI accepts. The dashboard used to omit `nse`
+                # and `yahoo_chart`, which is the difference between screening 12
+                # typed-in names and the exchange's own listing.
+                "data_sources": ["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                 "nse", "yahoo_chart"],
                 "timeframes": ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"],
             },
             "fingerprint": c.fingerprint(),
@@ -378,6 +597,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         timeframe: Optional[str] = None,
         top: Optional[int] = Query(None, ge=1, le=500),
         trendlines: bool = Query(False, description="also fit diagonal support/resistance"),
+        universe: str = Query("auto", description="auto | config | source"),
+        max_symbols: Optional[int] = Query(None, ge=0),
+        workers: int = Query(DEFAULT_WORKERS, ge=1, le=32),
     ) -> Dict[str, Any]:
         """Current setup state across the universe.
 
@@ -387,42 +609,17 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         endpoint hardcoded ADX/RSI period 14 and called ``trend_filter`` without
         the strategy's ``bias_mode``, so it applied a stricter trend gate than
         the backtest did.
+
+        ``universe`` resolves the symbol list exactly as ``tvlab scan --universe``
+        does, so "scan" here means the exchange's listing when the source can
+        enumerate it (NSE: 502 names), not the hand-typed config list.
         """
-        from ..screener import SCAN_BARS, rank, scan_universe, summarize
-
-        c = state.cfg
-        if timeframe:
-            c = c.merge({"timeframe.execution": timeframe})
-        syms = ([s.strip() for s in symbols.split(",")] if symbols
-                else list(c.universe.symbols))
-        if top:
-            syms = syms[:top]
-
-        strat = build_strategy(c)
-        store = DataStore(c)
-        rows, errors = scan_universe(store, c, syms, strat=strat,
-                                     timeframe=c.timeframe.execution, bars=SCAN_BARS,
-                                     with_trendlines=trendlines)
-
-        payload = []
-        for r in rank(rows, live_only=False, fee_bps=c.costs.fee_bps,
-                      slippage_bps=c.costs.slippage_bps,
-                      min_stop_distance_pct=c.risk.min_stop_distance_pct):
-            d = r.to_dict()
-            # `rr` is the key the frontend has always read; keep it as an alias
-            # rather than forcing a coordinated change in two places.
-            d["rr"] = d.pop("reward_risk", None)
-            payload.append(d)
-
-        s = summarize(rows, errors)
-        return _json_safe({
-            "rows": payload,
-            "errors": [{"symbol": k, "error": v} for k, v in errors.items()],
-            "strategy": c.strategy.name,
-            "timeframe": c.timeframe.execution,
-            "live_signals": s["live"],
-            "summary": s,
-        })
+        try:
+            return _scan_payload(state.cfg, symbols=symbols, universe=universe,
+                                 max_symbols=max_symbols, timeframe=timeframe, top=top,
+                                 trendlines=trendlines, workers=workers)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # ----------------------------------------------------------------- suggest
     @app.get("/api/suggest")
@@ -430,8 +627,13 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         symbols: Optional[str] = Query(None),
         timeframe: Optional[str] = Query(None),
         top: Optional[int] = Query(None, ge=1, le=500),
-        trendlines: bool = Query(True, description="fit diagonal support/resistance"),
+        # Off by default, matching `tvlab suggest`: no rendered column shows a
+        # trendline, and fitting one per symbol is pure cost across 500 names.
+        trendlines: bool = Query(False, description="fit diagonal support/resistance"),
         max_breakeven: float = Query(0.60, ge=0.05, le=1.0),
+        universe: str = Query("auto", description="auto | config | source"),
+        max_symbols: Optional[int] = Query(None, ge=0),
+        workers: int = Query(DEFAULT_WORKERS, ge=1, le=32),
     ) -> Dict[str, Any]:
         """Ranked shortlist, best risk:reward *after costs* first.
 
@@ -447,55 +649,13 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         trade count, so the two can be compared - and so the sample size stops the
         comparison being over-read.
         """
-        from ..screener import SCAN_BARS, scan_universe
-        from ..screener.quality import suggest as build_suggestions
-
-        c = state.cfg
-        if timeframe:
-            c = c.merge({"timeframe.execution": timeframe})
-        syms = ([s.strip() for s in symbols.split(",")] if symbols
-                else list(c.universe.symbols))
-        if top:
-            syms = syms[:top]
-
-        store = DataStore(c)
-        rows, errors = scan_universe(store, c, syms, strat=build_strategy(c),
-                                     timeframe=c.timeframe.execution, bars=SCAN_BARS,
-                                     with_trendlines=trendlines)
-        res = build_suggestions(rows, fee_bps=c.costs.fee_bps, slippage_bps=c.costs.slippage_bps,
-                                min_stop_distance_pct=c.risk.min_stop_distance_pct,
-                                max_breakeven=max_breakeven,
-                                allow_short=c.risk.allow_short)
-
-        measured = None
         try:
-            from ..cli import _measured_win_rate
-
-            measured = _measured_win_rate(c, c.strategy.name)
-        except Exception as exc:  # noqa: BLE001 - a missing report is not an API failure
-            log.debug("no measured win rate available: %s", exc)
-
-        return _json_safe({
-            "candidates": [x.to_dict() for x in res["candidates"]],
-            "rejected": res["rejected"],
-            "unscoreable": res["unscoreable"],
-            "shorts_skipped": res["shorts_skipped"],
-            "n_shorts_skipped": res["n_shorts_skipped"],
-            "n_candidates": res["n_candidates"],
-            "n_rejected": res["n_rejected"],
-            "round_trip_cost_bps": res["round_trip_cost_bps"],
-            "max_breakeven": res["max_breakeven"],
-            "weights": res["weights"],
-            "measured": measured,
-            "strategy": c.strategy.name,
-            "timeframe": c.timeframe.execution,
-            "market": c.universe.market,
-            "scanned": len(rows),
-            "errors": [{"symbol": k, "error": v} for k, v in errors.items()],
-            "note": ("A ranked shortlist is not a recommendation. Nothing here has been "
-                     "validated as profitable; `tvlab study` decides that, and its current "
-                     "verdict is NOT VALIDATED."),
-        })
+            return _suggest_payload(state.cfg, symbols=symbols, universe=universe,
+                                    max_symbols=max_symbols, timeframe=timeframe, top=top,
+                                    trendlines=trendlines, max_breakeven=max_breakeven,
+                                    workers=workers)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------- daily
     @app.get("/api/daily")
@@ -507,6 +667,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         max_breakeven: float = Query(0.60, ge=0.05, le=1.0),
         fundamentals: bool = Query(True, description="apply the fundamental gates"),
         journal: bool = Query(False, description="append this run to the daily journal"),
+        universe: str = Query("auto", description="auto | config | source"),
+        max_symbols: Optional[int] = Query(None, ge=0),
+        workers: int = Query(DEFAULT_WORKERS, ge=1, le=32),
     ) -> Dict[str, Any]:
         """The daily briefing: the same composition ``tvlab daily`` runs.
 
@@ -524,56 +687,96 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         false because a GET that writes is a surprise, and a dashboard that polls
         would otherwise fill the journal with duplicates of the same morning.
         """
-        from ..screener import SCAN_BARS, scan_universe
-        from ..screener.daily import append_journal, build_briefing
-
-        c = state.cfg
-        if timeframe:
-            c = c.merge({"timeframe.execution": timeframe})
-        syms = ([s.strip() for s in symbols.split(",")] if symbols
-                else list(c.universe.symbols))
-
-        store = DataStore(c)
-        rows, errors = scan_universe(store, c, syms, strat=build_strategy(c),
-                                     timeframe=c.timeframe.execution, bars=SCAN_BARS,
-                                     with_trendlines=trendlines)
-
-        measured = None
         try:
-            from ..cli import _measured_win_rate
+            return _briefing_payload(state.cfg, symbols=symbols, universe=universe,
+                                     max_symbols=max_symbols, timeframe=timeframe, top=top,
+                                     trendlines=trendlines, max_breakeven=max_breakeven,
+                                     fundamentals=fundamentals, journal=journal,
+                                     workers=workers)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-            measured = _measured_win_rate(c, c.strategy.name)
-        except Exception as exc:  # noqa: BLE001 - a missing report is not an API failure
-            log.debug("no measured win rate available: %s", exc)
+    # -------------------------------------------------------------------- jobs
+    # A 500-name NSE scan is ~1,500 HTTP requests: 80-140 seconds. Inside the GET
+    # that renders the panel that is a blank browser, and a reader cannot tell a
+    # slow scan from a hung one. So the long reads run as jobs: POST starts one,
+    # GET polls it with progress, and the page stays responsive while it works.
+    runner = JobRunner()
 
-        snaps, fund_error = None, None
-        want = bool(fundamentals and c.fundamentals.enabled)
-        if want and c.universe.market not in FUNDAMENTAL_MARKETS:
-            fund_error = (f"market '{c.universe.market}' has no earnings, book value or "
-                          f"analyst coverage, so there is nothing to gate on")
-        elif want and rows:
-            try:
-                snaps = fetch_fundamentals([r.symbol for r in rows],
-                                           market=c.universe.market,
-                                           max_symbols=max(len(rows), 200),
-                                           extra_fields=c.fundamentals.extra_fields)
-            except Exception as exc:  # noqa: BLE001 - an outage is a coverage fact
-                fund_error = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+    def _job_body(kind: str, cfg: AppConfig, params: Dict[str, Any]):
+        """Bind one job kind to the right builder, with the submit-time config.
 
-        b = build_briefing(rows, errors, c, snaps=snaps, study=measured,
-                           max_breakeven=max_breakeven, top=top,
-                           fundamentals_error=fund_error)
-        if journal:
-            try:
-                append_journal(b, REPO_ROOT / c.output.dir)
-            except Exception as exc:  # noqa: BLE001 - never fail the briefing on this
-                log.warning("could not journal the daily run: %s", exc)
+        The config is captured when the job is submitted, not read when it runs:
+        a scan that starts under NSE and finishes after the user switched to
+        crypto would otherwise report bars from one market against the fees of
+        another.
+        """
+        common = dict(
+            symbols=params.get("symbols") or None,
+            universe=str(params.get("universe") or "auto"),
+            max_symbols=_opt_int(params.get("max_symbols")),
+            timeframe=params.get("timeframe") or None,
+            workers=int(params.get("workers") or DEFAULT_WORKERS),
+        )
+        if kind == "daily":
+            return lambda prog: _briefing_payload(
+                cfg, **common,
+                top=int(params.get("top") or 10),
+                trendlines=bool(params.get("trendlines", False)),
+                max_breakeven=float(params.get("max_breakeven") or 0.60),
+                fundamentals=bool(params.get("fundamentals", True)),
+                journal=bool(params.get("journal", False)),
+                progress=prog)
+        if kind == "suggest":
+            return lambda prog: _suggest_payload(
+                cfg, **common,
+                top=_opt_int(params.get("top")),
+                trendlines=bool(params.get("trendlines", False)),
+                max_breakeven=float(params.get("max_breakeven") or 0.60),
+                progress=prog)
+        return lambda prog: _scan_payload(
+            cfg, **common,
+            top=_opt_int(params.get("top")),
+            trendlines=bool(params.get("trendlines", False)),
+            progress=prog)
 
-        payload = b.to_dict()
-        payload["fundamentals_error"] = fund_error
-        payload["journal_path"] = str(journal_path(REPO_ROOT / c.output.dir))
-        payload["recent_runs"] = read_journal(REPO_ROOT / c.output.dir, limit=10)
-        return _json_safe(payload)
+    @app.post("/api/jobs")
+    def start_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Start a scan; returns immediately with an id to poll.
+
+        A second request for a kind that is already running joins that job rather
+        than queueing another 500-name scan behind it. Pressing the button twice
+        should not make the answer fifteen minutes staler.
+        """
+        kind = str(payload.get("kind") or "").strip()
+        if kind not in ("daily", "suggest", "scan"):
+            raise HTTPException(status_code=400,
+                                detail=f"kind must be daily, suggest or scan; got {kind!r}")
+        params = dict(payload.get("params") or {})
+        running = runner.active(kind)
+        # Only an identical request joins: a scan that started under NSE must not
+        # answer a request that arrived after the user switched to the 12-name
+        # config list, because the symbols are the whole question.
+        if running is not None and running.params == params:
+            joined = running.to_dict(include_result=False)
+            joined["joined"] = True
+            return _json_safe(joined)
+        job = runner.submit(kind, _job_body(kind, state.cfg, params), params)
+        return _json_safe(job.to_dict(include_result=False))
+
+    @app.get("/api/jobs")
+    def list_jobs(limit: int = Query(10, ge=1, le=50)) -> Dict[str, Any]:
+        return _json_safe({"jobs": [j.to_dict(include_result=False)
+                                     for j in runner.recent(limit)]})
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str) -> Dict[str, Any]:
+        job = runner.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404,
+                                detail=f"no job {job_id!r}; it may have been trimmed "
+                                       f"from the last {len(runner.recent(50))} jobs")
+        return _json_safe(job.to_dict())
 
     # ------------------------------------------------------------------ review
     @app.get("/api/review")

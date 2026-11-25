@@ -18,8 +18,10 @@ and the backtest's answer on this data is in the study report - not here.
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -208,34 +210,106 @@ def scan_symbol(store, cfg: AppConfig, symbol: str, strat: Optional[Strategy] = 
     return row
 
 
+def _scan_one(store, cfg: AppConfig, sym: str, strat: Strategy, timeframe: Optional[str],
+              bars: int, with_bias: bool, with_trendlines: bool):
+    """One symbol: bias frame (fetched once, reused) then the scan row."""
+    bias = None
+    if with_bias:
+        try:
+            bias = store.bias_frame(sym)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: bias unavailable (%s)", sym, exc)
+    return scan_symbol(store, cfg, sym, strat=strat, timeframe=timeframe,
+                       bars=bars, bias=bias, with_trendlines=with_trendlines)
+
+
 def scan_universe(store, cfg: AppConfig, symbols: Sequence[str],
                   strat: Optional[Strategy] = None, timeframe: Optional[str] = None,
                   bars: int = SCAN_BARS, with_bias: bool = True,
-                  with_trendlines: bool = False,
+                  with_trendlines: bool = False, workers: int = 1,
+                  progress: Optional[Callable[[int, int], None]] = None,
                   ) -> Tuple[List[ScanRow], Dict[str, str]]:
     """Scan every symbol, collecting per-symbol errors instead of aborting.
 
     A universe scan that dies on the first delisted ticker is useless, so errors
     are returned alongside the rows. The bias frame is fetched once per symbol
     and reused for both the trend filter and the signal, which halves the work.
+
+    ``workers > 1`` fetches symbols concurrently. An Indian universe is 500+ names
+    at two HTTP requests each, which is ~20 minutes serially against Yahoo and a
+    couple of minutes with a modest pool. Row order follows ``symbols`` regardless
+    of completion order, so a parallel scan produces byte-identical output and the
+    journal does not depend on which request happened to finish first. The default
+    stays 1: network politeness is the caller's decision, not a hidden default.
+
+    ``progress(done, total)`` is called once per finished symbol - including the
+    ones that failed, because a progress bar that stalls on a delisted ticker is
+    indistinguishable from a hung request. It is how the dashboard shows a
+    500-name scan advancing instead of a two-minute blank spinner. A callback that
+    raises is logged and ignored: the scan of the other 499 names is worth more
+    than the display.
     """
     strat = strat or build_strategy(cfg)
+    syms = list(symbols)
     rows: List[ScanRow] = []
     errors: Dict[str, str] = {}
 
-    for sym in symbols:
+    total = len(syms)
+    tick_lock = threading.Lock()
+    counted = [0]
+
+    def tick() -> None:
+        if progress is None:
+            return
+        with tick_lock:
+            counted[0] += 1
+            done = counted[0]
         try:
-            bias = None
-            if with_bias:
+            progress(done, total)
+        except Exception as exc:  # noqa: BLE001 - a display bug must not lose rows
+            log.debug("scan progress callback failed (%s); continuing", exc)
+
+    def record(sym: str, outcome: Any) -> None:
+        if isinstance(outcome, BaseException):
+            errors[sym] = f"{type(outcome).__name__}: {outcome}"
+            log.warning("scan failed for %s: %s", sym, outcome)
+        else:
+            rows.append(outcome)
+        # Serial path ticks here; the pool ticks inside its worker, so completion
+        # order - not collection order - drives the progress count.
+        if not use_pool:
+            tick()
+
+    use_pool = bool(workers and workers > 1 and len(syms) > 1)
+
+    if use_pool:
+        # Materialise the adapter before the pool so construction is not raced.
+        store.source(None)
+
+        def work(sym: str):
+            try:
+                return _scan_one(store, cfg, sym, strat, timeframe, bars,
+                                 with_bias, with_trendlines)
+            finally:
+                tick()
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(syms))) as pool:
+            pending = {sym: pool.submit(work, sym) for sym in syms}
+            # Collected in input order, not completion order, so the table and the
+            # journal are identical whatever order the requests finish in.
+            for sym in syms:
                 try:
-                    bias = store.bias_frame(sym)
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("%s: bias unavailable (%s)", sym, exc)
-            rows.append(scan_symbol(store, cfg, sym, strat=strat, timeframe=timeframe,
-                                    bars=bars, bias=bias, with_trendlines=with_trendlines))
+                    record(sym, pending[sym].result())
+                except Exception as exc:  # noqa: BLE001 - per-symbol, not per-run
+                    record(sym, exc)
+        return rows, errors
+
+    for sym in syms:
+        try:
+            record(sym, _scan_one(store, cfg, sym, strat, timeframe, bars,
+                                  with_bias, with_trendlines))
         except Exception as exc:  # noqa: BLE001
-            errors[sym] = f"{type(exc).__name__}: {exc}"
-            log.warning("scan failed for %s: %s", sym, exc)
+            record(sym, exc)
 
     return rows, errors
 

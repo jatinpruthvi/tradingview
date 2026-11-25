@@ -195,9 +195,16 @@ def yahoo_symbol(symbol: str, market: str = "indian_equities") -> str:
     up = s.upper()
     if up in INDIA_INDEX_SYMBOLS:
         return INDIA_INDEX_SYMBOLS[up]
-    if any(c in s for c in ("^", "=", "/", "-")) or s.endswith((".NS", ".BO", ".SS", ".HK")):
+    # A hyphen is NOT evidence of an already-qualified Yahoo ticker. `BRK-B` is a
+    # US ticker, but `BAJAJ-AUTO` and `NAM-INDIA` are NSE symbols whose Yahoo
+    # ticker is `BAJAJ-AUTO.NS`. Treating every hyphen as "already qualified"
+    # silently 404'd those names, so a full-NSE scan lost them with no reason
+    # beyond "HTTP 404" - and they were the only names affected, which is exactly
+    # the kind of partial coverage that is invisible in a summary count.
+    indian = market in ("indian_equities", "india", "nse")
+    if any(c in s for c in ("^", "=", "/")) or s.endswith((".NS", ".BO", ".SS", ".HK")):
         return s
-    if market in ("indian_equities", "india", "nse"):
+    if indian:
         return f"{s}.NS"
     return s
 

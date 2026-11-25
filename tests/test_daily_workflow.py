@@ -111,11 +111,18 @@ def test_a_validated_study_changes_the_framing():
 
 
 def test_a_study_that_took_no_trades_does_not_look_validated():
+    """And it is not described as a broken report: the remedies are opposite.
+
+    A study that ran and took no trades says something real about the strategy;
+    a corrupt file says nothing. Calling both "unreadable" sends the reader to
+    re-run a study that already answered.
+    """
     b = build_briefing([_row("AAPL")], {}, _cfg(),
                        study={"status": "no_trades", "win_rate": None, "n_trades": 0})
     assert b.study_verdict is None
     assert b.is_validated is False
-    assert any("unreadable" in n for n in b.notes)
+    assert any("took no trades" in n for n in b.notes)
+    assert not any("unreadable" in n for n in b.notes)
 
 
 def test_a_corrupt_study_report_is_reported_as_such():

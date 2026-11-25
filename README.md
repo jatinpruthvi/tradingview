@@ -115,7 +115,7 @@ tvlab scan     --market crypto --style swing          # who is in a setup right 
 tvlab backtest --market crypto --style swing          # single pass, portfolio roll-up
 tvlab study    --market crypto --style swing          # the full validation run
 tvlab serve    --market crypto --style swing          # dashboard on :8000
-pytest                                                # 720 tests
+pytest                                                # 743 tests
 ```
 
 `tvlab daily` is the one to schedule. It composes the other three stages and writes
@@ -262,6 +262,15 @@ floor. The valuation thresholds (`max_pe_ttm`, `min_roe`, `min_analyst_rating`, 
 ship as `null` **on purpose** — the honest position is that this repo has no evidence
 for a number there, and a threshold would look rigorous while being arbitrary. Set
 one with `--set` if you have a view you can defend.
+
+The request is **batched at 50 names**. TradingView answers with a bounded page
+regardless of how many names the filter carries, so asking for 500 NSE names in one
+call returned **76 snapshots** — the other 424 were indistinguishable from names
+with no fundamentals, and the gates would have reported them as `unrated` rather
+than as a request that overflowed. Measured on Indian equities: 150 names in one
+request -> 76 rows; the same 150 in three requests of 50 -> 148. A full NSE `daily`
+now reports `fundamentals: 498 of 500 symbol(s) fetched`, for a couple of extra
+seconds.
 
 > **These thresholds have never been backtested.** No claim is made that any of them
 > improves expectancy. They are what a conservative mandate implies, nothing more.
@@ -479,6 +488,110 @@ tvlab nse holidays     # upcoming trading holidays
 advances **there is no trade for this configuration to take**. That is a fact
 about the mandate, not a failure of the scan.
 
+#### The option chain is recorded, not used
+
+NSE publishes a live option chain and **no history**, so a chain-based filter can
+only ever be judged against snapshots taken forward from now. `tvlab chain`
+exists to take those snapshots. Nothing it records touches `scan`, `suggest` or
+`daily`:
+
+```bash
+tvlab chain snapshot                # every NSE F&O name -> data/option_chain/chain_features.parquet
+tvlab chain snapshot --dry-run      # the same rows, printed, nothing written
+tvlab chain show                    # what has accumulated, and the latest day
+tvlab chain study                   # do the features predict forward returns?
+```
+
+Before wiring the chain into anything, the obvious readings were measured on
+2026-11-25 against that day's 19 ranked longs (15 of which had a chain):
+
+- **The "call wall" is mostly the next round strike.** 12 of 15 walls sat on a
+  multiple of 50, holding a few hundred lots against five figures of contracts
+  traded in the band. GLENMARK's "wall" at 2800 held 496 lots.
+- **The obvious rule vetoes everything.** "Do not buy with a call wall below your
+  target" removed 15 of 15 candidates - the strategy targets +25-33% while every
+  wall sat 0.4-7.8% above spot. A 1%-overhead version removed 4, a 5% version 9;
+  the threshold picked the answer.
+- **It does not rank.** Spearman against the quality score, n=15: PCR -0.07, ATM
+  IV +0.28, wall distance -0.11. All noise at that sample size.
+- **The one useful number is already in the bars.** Stops sat inside one sigma of
+  the market's own 28-day expected move for 8 of 15 names - a real critique of
+  stop placement. But ATM IV / 20-day realised volatility was **0.91** (corr
+  +0.66), so realised volatility from the bars gives the same answer, and it has
+  history, so *it* can be backtested.
+
+So the panel is a dataset, not a feature. `tvlab chain study` runs the honest
+test: for each feature, the **daily cross-sectional Spearman correlation**
+between it and the N-day forward return, averaged over days, with each day's IC
+treated as one observation.
+
+That test is chosen because it is answerable. Win rate is not: ~19 trades a year
+would need roughly 290 trades per arm (~15 years) to resolve a 19% -> 30% shift,
+while 218 names a day gives thousands of name-days within months.
+
+```bash
+tvlab chain study                      # 20-day horizon, refuses a verdict under 40 days
+tvlab chain study --horizon 10         # shorter window, more overlapping observations
+tvlab chain study --min-days 60 --features pcr,iv_rv_ratio
+```
+
+The command prints `mean IC`, its t (days as observations), the share of days
+whose IC agrees with the mean's sign, and the top-minus-bottom quintile spread.
+It refuses to give a verdict before `--min-days` usable cross-sections exist, and
+skips the bar fetch entirely while no panel day can have a forward return yet, so
+a fresh panel costs nothing to ask. The bar is `|t| >= 3`, not 2, because eight
+features are tested at once; clearing it earns the word *candidate*, and
+out-of-sample confirmation is still required before anything touches a pick.
+
+The panel is one row per symbol per trading day, and re-running on the same day
+**replaces** that day's rows rather than duplicating them. `ok` and `error` are
+recorded too, because "no positioning" and "the request failed" are different
+facts and chain coverage is itself a finding: half of the Nifty 500 has no listed
+options at all. The write is atomic, and a panel this version cannot read is
+refused rather than overwritten - there is no history to rebuild it from.
+
+### How many symbols get scanned
+
+The `symbols:` list in a market config is an **offline fallback, not the
+exchange's membership**. With `--data-source nse`, the universe is whatever NSE
+publishes - NIFTY 500 plus every F&O security, ~500 names - and `daily`, `scan`
+and `suggest` screen all of them:
+
+```bash
+tvlab scan --market indian_equities --style swing --data-source nse
+
+universe: 502 symbol(s) listed by 'nse'
+...
+showing the 25 most relevant of 502 scanned row(s); --top 502 to see all
+
+0 live signal(s) of 502 symbols scanned.
+```
+
+`--top` is a **display** limit; it no longer touches how much of the market is
+examined. Three separate things used to hide that, and all three are fixed:
+
+- `scan` truncated the universe to `syms[:top * 2]` - 40 names at the default -
+  and then reported "0 live signal(s) of 12 symbols scanned" as though the market
+  had been read.
+- `universe.max_symbols: 12` capped any universe built from the source. It is now
+  `0` (no cap) in the Indian config; `--max-symbols N` overrides per run for a
+  quicker pass.
+- `yahoo_symbol()` treated **any hyphen** as an already-qualified ticker, so
+  `BAJAJ-AUTO` and `NAM-INDIA` went out as `BAJAJ-AUTO` instead of
+  `BAJAJ-AUTO.NS` and 404'd. Exactly the hyphenated names were missing, which is
+  a partial-coverage failure that no summary count reveals.
+
+`--universe` decides where the list comes from: `auto` (default) uses the source's
+listing when that source can enumerate the exchange, `config` uses the hand-typed
+list, `source` forces the listing. `--workers` (default 8) fetches symbols
+concurrently and rows are reported in the input order regardless of completion
+order, so a parallel scan and a sequential one produce identical output. Measured
+cold on 30 NSE names: **137 s sequentially, 14 s with 8 workers**; the full
+500-name scan completes in about 80 seconds once the cache is warm, and the two
+failure modes stay distinguishable either way - a full NSE run today reports
+`0 live signal(s) of 499 symbols scanned (3 failed)` rather than pretending the
+three missing names were quiet.
+
 ### What a network failure looks like
 
 `tvlab scan` and `tvlab suggest` distinguish three outcomes, because collapsing
@@ -514,6 +627,47 @@ would need a paid history source. Daily bars are unaffected.
 
 ---
 
+## The dashboard
+
+```bash
+tvlab serve --market indian_equities --style swing --data-source nse
+# dashboard -> http://0.0.0.0:8000
+```
+
+One screen, six tabs, and it starts the briefing by itself: opening it answers
+"what does today look like" without being told to. All computation is server-side;
+the browser only renders.
+
+| Tab | What it shows |
+|:----|:--------------|
+| **Today** | the daily briefing - scan, cost-aware ranking, fundamental gates, and the study verdict **above** the table |
+| **Chart** | candles, EMAs, supertrend, RSI, BOS/CHoCH/sweep markers, FVG and order-block zones |
+| **Suggestions** | the ranked shortlist with breakeven win rates and the measured rate beside them |
+| **Scan** | every symbol's current state: trend, ADX, RSI, ATR%, sweep age, zone, signal |
+| **Journal** | what past shortlists actually did, scored in R |
+| **Backtest** | equity, KPIs, per-symbol rows, exit/setup breakdown, and the latest study report |
+
+Two things make it usable on a real universe rather than only on a watchlist:
+
+- **The Universe control** resolves symbols exactly as `tvlab scan --universe` does,
+  so the default on the Indian profile is NSE's own listing (502 names today), not
+  the 12 names typed into the config. Click any symbol in a table to chart it - names
+  a scan turns up are added to the chart's symbol list on the fly.
+- **Scans run as background jobs.** 500 names is ~1,500 HTTP requests; the page gets
+  a job id immediately and polls it, showing `daily: scanning 502 symbol(s) ·
+  377/502 · 63.5s` with a progress bar instead of a two-minute spinner. One scan of
+  a kind runs at a time and an identical request joins it, so pressing the button
+  twice cannot queue two full-market scans behind each other. `POST /api/jobs`,
+  `GET /api/jobs/{id}`; the older synchronous `GET /api/scan`, `/api/suggest` and
+  `/api/daily` endpoints still work and take the same `universe`, `max_symbols` and
+  `workers` parameters.
+
+`journal` in the header appends the run to `output/daily/journal.jsonl`; it is off by
+default because a GET (or a page that reloads) should not write to the record it is
+supposed to be measuring.
+
+---
+
 ## What it does
 
 ```
@@ -536,7 +690,7 @@ universe scanner  ->  signal engine  ->  backtester  ->  validation stack  ->  r
 | Daily | `screener/daily.py` | composes scan + rank + gates, carries the study verdict, appends a falsifiable journal |
 | Review | `screener/review.py` | scores that journal: replays each suggestion against the bars that followed, in R. Shares its fill conventions with `backtest/engine.py` |
 | Report | `report.py`, `study.py` | verdict, charts, markdown + JSON |
-| Dashboard | `dashboard/` | FastAPI + lightweight-charts v5.3.0 (vendored, no CDN) |
+| Dashboard | `dashboard/` | FastAPI + lightweight-charts v5.3.0 (vendored, no CDN); universe resolution shared with the CLI, background jobs for full-universe scans |
 
 ### Markets and styles
 
@@ -544,7 +698,7 @@ universe scanner  ->  signal engine  ->  backtester  ->  validation stack  ->  r
 |:-------|--------:|:---------|:-----------------|:-------|----------------:|
 | `crypto` | 10 | binance | 10 / 5 | yes | 0.60 |
 | `us_equities` | 12 | NASDAQ | 0.5 / 1 | yes | 0.65 |
-| `indian_equities` | 12 | NSE | 3 / 5 | **no** | 0.65 |
+| `indian_equities` | 12 (or the ~500-name NSE listing) | NSE | 3 / 5 | **no** | 0.65 |
 | `forex` | 7 | FX_IDC | 1 / 1.5 | yes | 0.40 |
 
 | Style | Execution | Bias | Default strategy | Max hold |

@@ -70,6 +70,19 @@ def test_yahoo_symbol_mapping(symbol, expected):
 def test_yahoo_symbol_does_not_suffix_non_indian_markets():
     assert yahoo_symbol("AAPL", "us_equities") == "AAPL"
     assert yahoo_symbol("RELIANCE", "us_equities") == "RELIANCE"
+    assert yahoo_symbol("BRK-B", "us_equities") == "BRK-B"
+
+
+def test_hyphenated_nse_symbols_still_get_the_ns_suffix():
+    """Regression: any hyphen counted as an already-qualified ticker.
+
+    A full-NSE universe lost exactly the hyphenated names - BAJAJ-AUTO, NAM-INDIA,
+    M&M-MFIN and friends - to HTTP 404s, because their Yahoo ticker is
+    ``BAJAJ-AUTO.NS`` and the request went out without the suffix.
+    """
+    assert yahoo_symbol("BAJAJ-AUTO", "indian_equities") == "BAJAJ-AUTO.NS"
+    assert yahoo_symbol("NAM-INDIA", "indian_equities") == "NAM-INDIA.NS"
+    assert yahoo_symbol("BAJAJ-AUTO.NS", "indian_equities") == "BAJAJ-AUTO.NS"
 
 
 def test_index_map_covers_the_names_used_in_configs():

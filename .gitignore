@@ -8,6 +8,9 @@ vendor/*
 # --- generated artefacts ---
 output/
 data/cache/
+# Forward-collected option chain snapshots. Not a cache: NSE publishes no chain
+# history, so clearing this directory destroys the only copy of that record.
+data/option_chain/
 *.csv.gz
 !tests/fixtures/*.csv
 

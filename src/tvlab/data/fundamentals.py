@@ -387,6 +387,12 @@ def _tv_names(symbols: Sequence[str]) -> Optional[List[str]]:
     return out or None
 
 
+#: Names per TradingView request. See the batching note in ``fetch_fundamentals``:
+#: the scanner answers with a bounded page, so a 500-name universe asked for in one
+#: call came back as 76 snapshots and the rest silently looked like missing data.
+TV_BATCH_SIZE = 50
+
+
 def fetch_fundamentals(
     symbols: Optional[Sequence[str]] = None,
     market: str = "us_equities",
@@ -426,33 +432,9 @@ def fetch_fundamentals(
             "tvlab asks for; the enum has probably been renamed upstream"
         )
 
-    try:
-        screener = tvs.StockScreener()
-    except Exception as exc:
-        raise DataError(f"could not construct tvscreener StockScreener: {exc}") from exc
-
     enum_name = MARKET_MAP.get(market, "AMERICA")
     Market = getattr(tvs, "Market", None)
-    if Market is not None and hasattr(Market, enum_name):
-        try:
-            screener.set_markets(getattr(Market, enum_name))
-        except Exception as exc:
-            log.warning("set_markets(%s) failed: %s", enum_name, exc)
-
-    # Ask for the market's own currency before the single request goes out. The
-    # parser is not the problem here - it reads whatever number the frame holds -
-    # so fixing this in ``build_snapshots`` would mean guessing an FX rate.
     ccy = MARKET_CURRENCY.get(market)
-    set_currency = getattr(screener, "set_currency", None)
-    if ccy and callable(set_currency):
-        try:
-            set_currency(ccy)
-        except Exception as exc:  # noqa: BLE001 - a cosmetic setting, not the data
-            log.warning("set_currency(%r) failed: %s; market cap is in the "
-                        "scanner's default currency (USD)", ccy, exc)
-    elif ccy:
-        log.warning("this tvscreener build has no set_currency(); %s market cap "
-                    "arrives in USD and min_market_cap must be read as USD", market)
 
     # Scope the scan to the asked-for names. Without this every request returns the
     # default 150-row page, which holds only ~75 Indian companies (each is listed on
@@ -475,20 +457,73 @@ def fetch_fundamentals(
         "  it just cannot tell you whether the company is worth owning."
     )
 
-    try:
-        screener.select(*resolved.values())
-        if names:
-            screener.where(tvs.StockField.NAME, tvs.FilterOperator.IN_RANGE, names)
-        df = screener.get()
-    except Exception as exc:
-        raise DataError(
-            f"TradingView fundamentals request failed: {type(exc).__name__}: {exc}\n"
-            + request_failed
-        ) from exc
+    def _request(batch: Optional[List[str]]) -> pd.DataFrame:
+        """One scanner page: a fresh screener per batch, because where() accumulates."""
+        try:
+            screener = tvs.StockScreener()
+        except Exception as exc:
+            raise DataError(f"could not construct tvscreener StockScreener: {exc}") from exc
 
-    if df is None or len(df) == 0:
+        if Market is not None and hasattr(Market, enum_name):
+            try:
+                screener.set_markets(getattr(Market, enum_name))
+            except Exception as exc:
+                log.warning("set_markets(%s) failed: %s", enum_name, exc)
+
+        # Ask for the market's own currency before the request goes out. The parser
+        # is not the problem here - it reads whatever number the frame holds - so
+        # fixing this in ``build_snapshots`` would mean guessing an FX rate.
+        set_currency = getattr(screener, "set_currency", None)
+        if ccy and callable(set_currency):
+            try:
+                set_currency(ccy)
+            except Exception as exc:  # noqa: BLE001 - a cosmetic setting, not the data
+                log.warning("set_currency(%r) failed: %s; market cap is in the "
+                            "scanner's default currency (USD)", ccy, exc)
+        elif ccy:
+            log.warning("this tvscreener build has no set_currency(); %s market cap "
+                        "arrives in USD and min_market_cap must be read as USD", market)
+
+        try:
+            screener.select(*resolved.values())
+            if batch:
+                screener.where(tvs.StockField.NAME, tvs.FilterOperator.IN_RANGE, batch)
+            out = screener.get()
+        except Exception as exc:
+            raise DataError(
+                f"TradingView fundamentals request failed: {type(exc).__name__}: {exc}\n"
+                + request_failed
+            ) from exc
+        return out
+
+    # One page per batch. The scanner answers with a bounded page even when the
+    # where() names are in the hundreds, so asking for 500 NSE names in one call
+    # returned 76 snapshots: the other 424 looked exactly like names with no
+    # fundamentals, which the gates then report as "unrated" rather than as a
+    # coverage gap in a request that silently overflowed. Measured on Indian
+    # equities: 150 names in one request -> 76 rows; the same 150 in three
+    # requests of 50 -> 148. The extra requests cost a couple of seconds.
+    batches: List[Optional[List[str]]] = (
+        [names[i:i + TV_BATCH_SIZE] for i in range(0, len(names), TV_BATCH_SIZE)]
+        if names else [None]
+    )
+    frames = []
+    for batch in batches:
+        page = _request(batch)
+        if page is not None and len(page):
+            frames.append(page)
+        else:
+            log.debug("fundamentals: a batch of %s returned no rows",
+                      len(batch) if batch else "all names")
+
+    if not frames:
         raise DataError("fundamentals request returned 0 rows")
 
+    # A column that is entirely NA on one page contributes nothing from that page but
+    # still triggers pandas' "all-NA entries" dtype warning on concat; dropping those
+    # per page keeps the merge quiet without discarding any value.
+    pages = [f.dropna(axis=1, how="all") for f in frames]
+    df = pages[0] if len(pages) == 1 else pd.concat(pages, ignore_index=True)
     return build_snapshots(df, resolved, symbols=symbols, max_symbols=max_symbols,
                            unresolved=unresolved)
 

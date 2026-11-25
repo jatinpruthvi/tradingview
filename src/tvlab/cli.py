@@ -11,6 +11,8 @@
     tvlab compare                       run every strategy side by side
     tvlab validate                      lookahead audit + pattern recovery only
     tvlab serve                         dashboard (FastAPI + lightweight-charts)
+    tvlab chain snapshot                record the option chain daily (no history exists)
+    tvlab chain study                   test those features against forward returns
 
 Every command takes ``--market`` and ``--style`` to pick a config layer, and
 ``--set key.path=value`` for one-off overrides.
@@ -21,9 +23,9 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 import numpy as np
@@ -32,6 +34,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .config import CONFIG_DIR, REPO_ROOT, AppConfig, load_config
+from .screener.universe import ENUMERABLE_SOURCES, resolve_universe
 
 console = Console()
 
@@ -74,6 +77,40 @@ def _symbols_arg(cfg: AppConfig, symbols: Optional[str]) -> List[str]:
     if symbols:
         return [s.strip() for s in symbols.split(",") if s.strip()]
     return list(cfg.universe.symbols)
+
+
+#: Sources whose ``list_symbols`` enumerates the *exchange's* tradeable universe.
+#: Re-exported for callers that predate :mod:`tvlab.screener.universe`; the set
+#: itself lives there now, because the dashboard resolves universes too and two
+#: copies of "which sources can list" is how the two front ends drift apart.
+_ENUMERABLE_SOURCES = ENUMERABLE_SOURCES
+
+
+def _resolve_universe(cfg: AppConfig, symbols: Optional[str],
+                      universe: Optional[str] = None,
+                      max_symbols: Optional[int] = None
+                      ) -> Tuple[List[str], str]:
+    """Symbols to screen, plus a one-line statement of where they came from.
+
+    ``--symbols`` always wins. Otherwise ``--universe auto`` (the default) uses the
+    data source's own listing when that source can enumerate the exchange - which
+    is what the Indian market config promises - and the hand-typed ``symbols`` list
+    everywhere else. ``config`` and ``source`` force either half.
+
+    The resolved count is returned as text rather than left implicit, because the
+    failure this replaces was silent: the command said "scanned 12 symbols" and the
+    reader had no way to know the exchange lists 502.
+    """
+    try:
+        syms, note = resolve_universe(cfg, symbols, universe, max_symbols)
+    except ValueError as exc:
+        raise click.BadParameter("--universe must be auto, config or source") from exc
+    # The CLI spells an explicit list as ``--symbols``; the shared resolver is
+    # front-end neutral and says "the explicit list", so the wording the terminal
+    # has always printed is restored here instead of in the resolver.
+    if symbols and syms:
+        note = note.replace("the explicit list", "--symbols")
+    return syms, note
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -247,8 +284,15 @@ def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional
               help="reject anything needing a higher win rate than this to break even")
 @click.option("--trendlines", is_flag=True, default=False,
               help="fit diagonal support/resistance and prefer structural stops")
+@click.option("--universe", type=click.Choice(["auto", "config", "source"]), default="auto",
+              show_default=True,
+              help="auto: use the source's listing when it can enumerate the exchange")
+@click.option("--max-symbols", type=int, default=None,
+              help="cap the universe built from the source (0 = no cap)")
+@click.option("--workers", type=int, default=8, show_default=True,
+              help="concurrent symbol fetches (1 = strictly sequential)")
 def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, top,
-            max_breakeven, trendlines) -> None:
+            max_breakeven, trendlines, universe, max_symbols, workers) -> None:
     """Rank the universe into a shortlist, best risk:reward after costs first.
 
     This is the command to run when you want "what is the best idea right now".
@@ -278,12 +322,13 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
 
     cfg = _cfg(market, style, config, set_pairs, data_source)
     tf = timeframe or cfg.timeframe.execution
-    syms = _symbols_arg(cfg, symbols)
+    syms, universe_note = _resolve_universe(cfg, symbols, universe, max_symbols)
 
     store = DataStore(cfg)
     strat = build_strategy(cfg)
     rows, errors = scan_universe(store, cfg, syms, strat=strat, timeframe=tf,
-                                 bars=SCAN_BARS, with_trendlines=trendlines)
+                                 bars=SCAN_BARS, with_trendlines=trendlines,
+                                 workers=workers)
 
     res = build_suggestions(rows, fee_bps=cfg.costs.fee_bps, slippage_bps=cfg.costs.slippage_bps,
                             min_stop_distance_pct=cfg.risk.min_stop_distance_pct,
@@ -293,6 +338,7 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
     rt = res["round_trip_cost_bps"]
     console.print(f"\n[bold]Suggestions[/bold] - {cfg.strategy.name} on {tf} "
                   f"({cfg.universe.market}/{cfg.style or style or 'default'})")
+    console.print(f"  universe: {universe_note}")
     console.print(f"  round-trip cost {rt:.1f} bp  ·  scanned {len(rows)} symbols  ·  "
                   f"{res['n_candidates']} candidate(s), {res['n_rejected']} rejected  ·  "
                   f"max breakeven {max_breakeven * 100:.0f}%"
@@ -484,8 +530,16 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
               help="do not append this run to output/daily/journal.jsonl")
 @click.option("--trendlines", is_flag=True, default=False,
               help="also fit diagonal support/resistance (~27 ms per symbol)")
+@click.option("--universe", type=click.Choice(["auto", "config", "source"]), default="auto",
+              show_default=True,
+              help="auto: use the source's listing when it can enumerate the exchange")
+@click.option("--max-symbols", type=int, default=None,
+              help="cap the universe built from the source (0 = no cap)")
+@click.option("--workers", type=int, default=8, show_default=True,
+              help="concurrent symbol fetches (1 = strictly sequential)")
 def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top,
-          max_breakeven, no_fundamentals, no_journal, trendlines) -> None:
+          max_breakeven, no_fundamentals, no_journal, trendlines, universe,
+          max_symbols, workers) -> None:
     """The daily run: what to look at today, and why not to trust it.
 
     This is the command to schedule. It composes three things that already exist
@@ -538,13 +592,14 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
 
     cfg = _cfg(market, style, config, set_pairs, data_source)
     tf = timeframe or cfg.timeframe.execution
-    syms = _symbols_arg(cfg, symbols)
+    syms, universe_note = _resolve_universe(cfg, symbols, universe, max_symbols)
     mkt = cfg.universe.market
 
     store = DataStore(cfg)
     strat = build_strategy(cfg)
     rows, errors = scan_universe(store, cfg, syms, strat=strat, timeframe=tf,
-                                 bars=SCAN_BARS, with_trendlines=trendlines)
+                                 bars=SCAN_BARS, with_trendlines=trendlines,
+                                 workers=workers)
 
     # ---- fundamentals: guarded, because this is the only step that needs a route
     # to TradingView, and its absence must be visible rather than silent.
@@ -570,6 +625,7 @@ def daily(market, style, config, set_pairs, symbols, data_source, timeframe, top
 
     console.print(f"\n[bold]Daily briefing[/bold] - {b.as_of}  "
                   f"[dim]{mkt} / {b.style} / {b.strategy} / {tf}[/dim]")
+    console.print(f"  [dim]universe: {universe_note}[/dim]")
 
     # The advisory precedes the shortlist, always. Ranking candidates without
     # carrying the validation verdict forward would launder an unvalidated
@@ -1017,8 +1073,15 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
 @click.option("--top", type=int, default=20)
 @click.option("--trendlines", is_flag=True, default=False,
               help="also fit diagonal support/resistance (~27 ms per symbol)")
+@click.option("--universe", type=click.Choice(["auto", "config", "source"]), default="auto",
+              show_default=True,
+              help="auto: use the source's listing when it can enumerate the exchange")
+@click.option("--max-symbols", type=int, default=None,
+              help="cap the universe built from the source (0 = no cap)")
+@click.option("--workers", type=int, default=8, show_default=True,
+              help="concurrent symbol fetches (1 = strictly sequential)")
 def scan(market, style, config, set_pairs, symbols, data_source, screener, timeframe, top,
-         trendlines) -> None:
+         trendlines, universe, max_symbols, workers) -> None:
     """Screen a universe and report the current setup state per symbol.
 
     For each symbol this reports the higher-timeframe trend, whether a liquidity
@@ -1036,7 +1099,7 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
     cfg = _cfg(market, style, config, set_pairs, data_source)
     tf = timeframe or cfg.timeframe.execution
 
-    syms = _symbols_arg(cfg, symbols)
+    syms, universe_note = _resolve_universe(cfg, symbols, universe, max_symbols)
     if screener:
         try:
             from .data.tv_screener_source import TvScreenerSource
@@ -1044,15 +1107,20 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
             src = TvScreenerSource(market=cfg.universe.market)
             syms = src.symbols(min_volume=cfg.universe.min_quote_volume,
                                max_symbols=cfg.universe.max_symbols)
-            console.print(f"screener returned {len(syms)} symbols")
+            universe_note = f"{len(syms)} symbol(s) from the TradingView screener"
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]screener unavailable ({exc}); using config symbols[/yellow]")
+            console.print(f"[yellow]screener unavailable ({exc}); using {universe_note}[/yellow]")
 
     store = DataStore(cfg)
     strat = build_strategy(cfg)
-    rows, errors = scan_universe(store, cfg, syms[:top * 2], strat=strat, timeframe=tf,
-                                 with_trendlines=trendlines)
+    # The whole resolved universe is scanned. This used to be `syms[:top * 2]`,
+    # which silently truncated the universe to twice the number of table rows the
+    # user asked to *display* - so a 502-name market was screened as 40 names and
+    # the report still said "0 live signal(s)" as though the market had been read.
+    rows, errors = scan_universe(store, cfg, syms, strat=strat, timeframe=tf,
+                                 with_trendlines=trendlines, workers=workers)
 
+    console.print(f"[dim]universe: {universe_note}[/dim]")
     t = Table(title=f"Scan - {cfg.strategy.name} on {tf} ({cfg.universe.market})")
     cols = ["symbol", "last", "chg %", "trend", "ADX", "RSI", "ATR %",
             "sweep", "sweep age", "FVG/OB", "signal", "stop", "target", "R:R"]
@@ -1068,7 +1136,14 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
     _trend_markup = {1: "[green]UP[/green]", -1: "[red]DOWN[/red]", 0: "flat"}
     _signal_markup = {1: "[green]LONG[/green]", -1: "[red]SHORT[/red]", 0: "-"}
 
-    for r in rows:
+    # Display order is the ranking, truncated to --top; the SCAN itself was over
+    # every symbol. Separating "how many rows fit on a terminal" from "how much of
+    # the market was examined" is the whole point: the two were the same number.
+    ordered = rank(rows, live_only=False, fee_bps=cfg.costs.fee_bps,
+                   slippage_bps=cfg.costs.slippage_bps,
+                   min_stop_distance_pct=cfg.risk.min_stop_distance_pct)
+    shown = ordered[:top] if top and top > 0 else ordered
+    for r in shown:
         if r.bars < 2:
             t.add_row(r.symbol, "NO DATA", (r.warnings or [""])[0][:70], *[""] * pad)
             continue
@@ -1092,6 +1167,9 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
         t.add_row(sym, "FAILED", err[:70], *[""] * pad)
 
     console.print(t)
+    if len(shown) < len(rows):
+        console.print(f"[dim]showing the {len(shown)} most relevant of {len(rows)} scanned "
+                      f"row(s); --top {len(rows)} to see all[/dim]")
 
     s = summarize(rows, errors)
     console.print(f"\n[bold]{s['live']} live signal(s)[/bold] of {s['scanned']} symbols scanned"
@@ -1727,6 +1805,314 @@ def nse_holidays(market, style, config, index, days) -> None:
     for d in upcoming:
         t.add_row(d.isoformat(), d.strftime("%A"))
     console.print(t)
+
+
+# --------------------------------------------------------------- option chain
+#: Where the forward-collected chain panel lives, relative to the repo root, so
+#: a cron job, an interactive shell and the dashboard all mean the same file.
+DEFAULT_CHAIN_PANEL = "data/option_chain/chain_features.parquet"
+
+
+def _chain_client():
+    """Build the chain client. A function so tests can replace it wholesale.
+
+    ``ChainHttp`` resolves its fetcher lazily for the same reason ``nse.Http``
+    does: a fetcher bound at import time cannot be patched, and the tests would
+    go to the network while appearing to be offline.
+    """
+    from .data.option_chain import ChainHttp
+
+    return ChainHttp()
+
+
+def _chain_symbols(cfg: AppConfig, symbols: Optional[str], limit: int
+                   ) -> Tuple[List[str], str]:
+    """The names to snapshot, and a one-line statement of where they came from.
+
+    The default is NSE's own F&O list, because those are exactly the securities
+    with listed options. Today's *candidates* would be the wrong panel: they are
+    the names that already passed the filter, so a chain feature measured only
+    on them could not be tested for selection - the sample would already be the
+    answer.
+    """
+    if symbols:
+        syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        note = "--symbols"
+    else:
+        try:
+            rows = _nse_src(cfg).market_watch("SECURITIES IN F&O")
+            syms = sorted({str(r["symbol"]).upper() for r in rows if r.get("symbol")})
+            note = f"{len(syms)} NSE F&O securities"
+        except Exception as exc:  # noqa: BLE001 - the config list still works
+            syms = list(cfg.universe.symbols)
+            note = f"config list ({type(exc).__name__}) - F&O list unreachable"
+    if limit:
+        syms = syms[:limit]
+    return syms, note
+
+
+@cli.group()
+def chain():
+    """India: the option chain, recorded daily because it cannot be backfilled.
+
+    NSE publishes a live chain and no history, so any chain filter can only ever
+    be tested against snapshots taken forward from today. That is what this
+    group is for: ``snapshot`` writes the raw measurements, and nothing here is
+    wired into scoring or into ``suggest``.
+
+    The reason for the caution is measured, not assumed. On 2026-11-25 the
+    popular readings failed first contact: the "call wall" was the next 50-point
+    strike 12 times out of 15, holding a few hundred lots against five figures
+    of traded volume, and a "no call wall below target" rule vetoed 15 of 15
+    ranked longs. The chain's one genuinely useful number is the expected move
+    (ATM IV over the hold), and that was 0.91x 20-day realized volatility -
+    i.e. already in the bars, where it can be backtested.
+    """
+
+
+def _plain(v: Any) -> Any:
+    """pandas' nullable dtypes hand back ``pd.NA``, which ``_cell`` would print
+    as the literal text "<NA>" in a column where every other cell says "-".
+    """
+    try:
+        return None if v is None or pd.isna(v) else v
+    except (TypeError, ValueError):
+        return v
+
+
+@chain.command("snapshot")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="position", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--symbols", default=None,
+              help="comma-separated; default is every NSE F&O security")
+@click.option("--limit", type=int, default=0, show_default=True,
+              help="snapshot the first N symbols (0 = the whole list)")
+@click.option("--min-dte", type=int, default=21, show_default=True,
+              help="nearest expiry at least this many days out")
+@click.option("--out", type=click.Path(path_type=Path), default=None,
+              help=f"parquet panel (default: {DEFAULT_CHAIN_PANEL})")
+@click.option("--dry-run", is_flag=True, help="print today's rows, write nothing")
+@_catch_data_error
+def chain_snapshot(market, style, config, symbols, limit, min_dte, out, dry_run) -> None:
+    """Append today's chain features to the panel: one row per symbol per day.
+
+    Re-running the same day replaces that day's rows rather than adding a second
+    copy, so an intraday retry is safe. The write is atomic, and a panel this
+    command cannot read is refused rather than overwritten - NSE has no history
+    to rebuild it from.
+    """
+    from .data.nse import IST
+    from .data.option_chain import append_rows, snapshot_symbol
+
+    cfg = _cfg(market, style, config, ())
+    syms, note = _chain_symbols(cfg, symbols, limit)
+    path = Path(out) if out else REPO_ROOT / DEFAULT_CHAIN_PANEL
+    today = datetime.now(IST).date()
+
+    console.print(f"snapshotting {len(syms)} symbol(s) from {note} "
+                  f"for {today.isoformat()} ({min_dte}+ DTE)")
+    http = _chain_client()
+    rows: List[Dict[str, Any]] = []
+    for i, sym in enumerate(syms, 1):
+        rows.append(snapshot_symbol(http, sym, today=today, min_dte=min_dte))
+        if i % 25 == 0 or i == len(syms):
+            ok = sum(1 for r in rows if r["ok"])
+            console.print(f"  {i}/{len(syms)} · {ok} with a usable chain")
+
+    ok = sum(1 for r in rows if r["ok"])
+    failed = [r["symbol"] for r in rows if not r["ok"]]
+    t = Table(title=f"option chain - {today.isoformat()}")
+    for col, justify in (("symbol", "left"), ("spot", "right"), ("pcr", "right"),
+                         ("wall %", "right"), ("atm iv", "right"), ("dte", "right"),
+                         ("note", "left")):
+        t.add_column(col, justify=justify)
+    for r in rows:
+        t.add_row(r["symbol"], _cell(_plain(r["spot"])), _cell(_plain(r["pcr"])),
+                  _pct(_plain(r["call_wall_dist_pct"])), _cell(_plain(r["atm_iv"])),
+                  _cell(_plain(r["dte"])), r["error"] or "")
+    console.print(t)
+
+    if dry_run:
+        console.print(f"\n[dim]--dry-run: {ok}/{len(rows)} usable, nothing written[/dim]")
+        return
+
+    panel = append_rows(path, rows)
+    console.print(f"\n[bold]{ok}/{len(rows)} with a usable chain[/bold] - {path} now holds "
+                  f"{len(panel)} row(s) across {panel['as_of'].nunique()} day(s)")
+    if failed:
+        console.print(f"[yellow]{len(failed)} without one: {', '.join(failed[:8])}"
+                      f"{' …' if len(failed) > 8 else ''}[/yellow]")
+    console.print("[dim]the point of the panel is a testable sample, not a filter: "
+                  "test it against forward returns before it touches a pick[/dim]")
+
+
+@chain.command("show")
+@click.option("--panel", "panel_path", default=None,
+              type=click.Path(path_type=Path), help=f"default: {DEFAULT_CHAIN_PANEL}")
+@click.option("--top", default=20, show_default=True, help="rows of the latest day to print")
+@_catch_data_error
+def chain_show(panel_path, top) -> None:
+    """What the panel has accumulated, and the latest day in one table."""
+    from .data.option_chain import load_panel
+
+    path = Path(panel_path) if panel_path else REPO_ROOT / DEFAULT_CHAIN_PANEL
+    panel = load_panel(path)
+    if panel.empty:
+        console.print(f"[yellow]{path} is empty[/yellow] - run `tvlab chain snapshot` first")
+        return
+
+    usable = panel[panel["ok"].astype(bool)]
+    latest = str(panel["as_of"].max())
+    days = panel["as_of"].nunique()
+    console.print(f"[bold]{path}[/bold]  {len(panel)} rows · {days} day(s) · "
+                  f"{len(usable)} usable ({len(usable) / len(panel):.0%}) · "
+                  f"{panel['symbol'].nunique()} symbols")
+    console.print(f"latest {latest}: {int((panel['as_of'] == latest).sum())} row(s)")
+
+    day = panel[panel["as_of"] == latest].head(top)
+    t = Table(title=f"chain features - {latest}")
+    for col, justify in (("symbol", "left"), ("spot", "right"), ("pcr", "right"),
+                         ("wall %", "right"), ("put %", "right"),
+                         ("atm iv", "right"), ("dte", "right")):
+        t.add_column(col, justify=justify)
+    for _, r in day.iterrows():
+        t.add_row(str(r["symbol"]), _cell(_plain(r["spot"])), _cell(_plain(r["pcr"])),
+                  _pct(_plain(r["call_wall_dist_pct"])),
+                  _pct(_plain(r["put_wall_dist_pct"])),
+                  _cell(_plain(r["atm_iv"])), _cell(_plain(r["dte"])))
+    console.print(t)
+    console.print("[dim]a chain feature is not a signal until the panel shows it predicts "
+                  "forward returns; six months of rows is the minimum honest sample[/dim]")
+
+
+def _chain_returns(cfg: AppConfig, panel, horizon: int, workers: int):
+    """Forward returns for every panel row, from the bars the store already has.
+
+    A function rather than an inline loop so the CLI tests can supply returns
+    without 218 Yahoo requests - the same injection point ``_chain_client``
+    provides for the snapshot side.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .chain_study import forward_returns
+    from .data.nse import IST
+    from .data.store import DataStore
+
+    store = DataStore(cfg)
+    syms = sorted({str(s) for s in panel["symbol"]})
+    # 150 calendar days before the oldest snapshot: the store refuses a window
+    # under 60 bars, and the 20-day realised-vol feature needs its own run-up on
+    # top of the forward window. Asking for exactly the panel span returns a
+    # DataError on day one of every study.
+    start = (date.fromisoformat(str(panel["as_of"].min())) - timedelta(days=150)).isoformat()
+    end = (datetime.now(IST).date() + timedelta(days=1)).isoformat()
+
+    def one(sym: str):
+        try:
+            return sym, store.ohlcv(sym, "1d", start=start, end=end)
+        except Exception as exc:  # noqa: BLE001 - one missing symbol, not a dead study
+            console.print(f"[yellow]no bars for {sym}: {exc}[/yellow]")
+            return sym, None
+
+    bars = {}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for sym, df in pool.map(one, syms):
+            if df is not None and not df.empty:
+                bars[sym] = df
+    return forward_returns(panel, bars, horizon=horizon, market=cfg.universe.market)
+
+
+@chain.command("study")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="position", show_default=True)
+@click.option("--config", default=None, type=click.Path(exists=True))
+@click.option("--panel", "panel_path", default=None,
+              type=click.Path(path_type=Path), help=f"default: {DEFAULT_CHAIN_PANEL}")
+@click.option("--horizon", type=int, default=20, show_default=True,
+              help="forward return window, in trading days")
+@click.option("--min-days", type=int, default=40, show_default=True,
+              help="days of cross-section required before any verdict")
+@click.option("--min-names", type=int, default=20, show_default=True,
+              help="names a day needs to count as a cross-section")
+@click.option("--features", default=None, help="comma-separated subset of panel columns")
+@click.option("--workers", type=int, default=8, show_default=True)
+@_catch_data_error
+def chain_study_cmd(market, style, config, panel_path, horizon, min_days,
+                    min_names, features, workers) -> None:
+    """Test the panel: do chain features predict forward returns?
+
+    Win rate cannot be tested at this strategy's trade frequency - ~19 trades a
+    year, and ~290 per arm to resolve a 19% -> 30% shift. Forward returns can: 218
+    names a day is a dense cross-section, and it answers the question that matters
+    first, which is whether a high reading of a feature across today's names says
+    anything about how those names do over the next N days.
+
+    No verdict is given before --min-days of usable cross-sections exist, and
+    the command says that rather than printing a number a reader would inevitably
+    treat as one. The bar fetch is skipped entirely while no panel day is old
+    enough to have a forward return yet.
+    """
+    from .chain_study import forward_window_open, study
+    from .data.nse import IST
+    from .data.option_chain import load_panel
+
+    cfg = _cfg(market, style, config, ())
+    path = Path(panel_path) if panel_path else REPO_ROOT / DEFAULT_CHAIN_PANEL
+    panel = load_panel(path)
+    if panel.empty:
+        console.print(f"[yellow]{path} is empty[/yellow] - run `tvlab chain snapshot` first")
+        return
+
+    chosen = [f.strip() for f in features.split(",") if f.strip()] if features else None
+    console.print(f"[bold]{path}[/bold]  {len(panel)} rows · {panel['as_of'].nunique()} day(s) "
+                  f"· {panel['symbol'].nunique()} symbols · horizon {horizon}d")
+
+    dropped: Dict[str, int] = {}
+    if forward_window_open(panel, horizon, datetime.now(IST).date()):
+        console.print(f"fetching daily bars for {panel['symbol'].nunique()} symbols …")
+        returns, dropped = _chain_returns(cfg, panel, horizon, workers)
+        console.print(f"  {len(returns)} panel row(s) have a closed {horizon}-day window")
+    else:
+        console.print("[yellow]no panel day is old enough to have a "
+                      f"{horizon}-day forward return yet[/yellow]")
+        returns = panel.iloc[0:0].assign(fwd_ret=None, rv20=None, entry_date=None)
+
+    res = study(panel, returns, horizon=horizon, min_days=min_days,
+                min_names=min_names, features=chosen, dropped=dropped)
+
+    # Column widths are chosen so the full feature name fits in an 80-column
+    # terminal: rich truncates cells, and "iv_rv_rat…" is unreadable. The label
+    # for each feature lives in --json output and in the module's FEATURES table.
+    t = Table(title=f"chain features vs {horizon}-day forward returns")
+    t.add_column("feature", justify="left", no_wrap=True, min_width=19)
+    for col in ("days", "n", "mean IC", "t", "same sign", "Q5-Q1"):
+        t.add_column(col, justify="right")
+    # A one-character marker instead of a word: at 80 columns a "no sample" cell
+    # wraps onto a second line and turns eight rows into sixteen.
+    t.add_column("*", justify="center")
+    for r in res.results:
+        t.add_row(r.feature, str(r.days), str(r.rows),
+                  "-" if not np.isfinite(r.mean_ic) else f"{r.mean_ic:+.3f}",
+                  "-" if not np.isfinite(r.ic_t) else f"{r.ic_t:+.2f}",
+                  "-" if not np.isfinite(r.consistency) else f"{r.consistency:.0%}",
+                  "-" if not np.isfinite(r.quintile_spread) else f"{r.quintile_spread * 100:+.2f}%",
+                  "[bold]*[/bold]" if r.notable else "")
+    console.print(t)
+    if not any(r.has_sample for r in res.results):
+        console.print("[dim]no feature had a day with enough names to form a "
+                      "cross-section yet - the '*' column marks a candidate feature[/dim]")
+
+    colour = "yellow" if res.insufficient else ("green" if res.candidates else "white")
+    console.print(f"\n[{colour}]{res.verdict}[/{colour}]")
+    for note in res.notes:
+        console.print(f"[dim]- {note}[/dim]")
+    console.print("[dim]mean IC is the average daily cross-sectional Spearman rank correlation; "
+                  "days are treated as independent, so |t| is a screening statistic, not a "
+                  "p-value. Eight features are tested at once: the bar is |t| >= 3.[/dim]")
+    if res.insufficient:
+        console.print(f"[dim]the panel needs {res.min_days - res.evaluated_days} more usable "
+                      f"day(s) before this command will judge anything[/dim]")
 
 
 def _pct(v: Optional[float]) -> str:

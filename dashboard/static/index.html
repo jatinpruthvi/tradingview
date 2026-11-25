@@ -14,7 +14,7 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
        font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-  header{display:flex;align-items:center;gap:14px;padding:12px 18px;background:var(--panel);
+  header{display:flex;align-items:center;gap:14px;padding:10px 18px 8px;background:var(--panel);
          border-bottom:1px solid var(--line);flex-wrap:wrap}
   header h1{font-size:16px;margin:0;letter-spacing:.3px}
   header .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);
@@ -24,12 +24,34 @@
   button{cursor:pointer}
   button:hover{border-color:var(--accent)}
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;padding:14px}
-  @media(max-width:1100px){main{grid-template-columns:1fr}}
+  .brand{display:flex;align-items:center;gap:10px}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-left:auto}
+  .chk{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
+  .statusline{display:flex;align-items:center;gap:10px;width:100%;margin-top:2px}
+  #status{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;
+          text-overflow:ellipsis;max-width:78ch}
+  .bar{flex:1;height:4px;background:var(--panel2);border-radius:3px;overflow:hidden;min-width:80px}
+  #barfill{height:100%;width:0%;background:var(--accent);transition:width .25s ease}
+  #barfill.bad{background:var(--down)}
+  #barfill.good{background:var(--up)}
+  nav.tabs{display:flex;gap:4px;padding:8px 14px 0;background:var(--bg);
+           position:sticky;top:0;z-index:5;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .tab{background:transparent;border:1px solid transparent;border-bottom:none;color:var(--muted);
+       padding:7px 13px;border-radius:8px 8px 0 0;font-size:13px}
+  .tab:hover{color:var(--text)}
+  .tab.active{background:var(--panel);border-color:var(--line);color:var(--text);font-weight:600}
+  main{padding:14px}
+  .pane{display:none}
+  .pane.active{display:block}
+  .two{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px}
+  @media(max-width:1100px){.two{grid-template-columns:1fr}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);
            margin:0;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
   .card .body{padding:12px 14px}
+  .hint{font-size:12px;color:var(--muted);padding:8px 14px;background:var(--panel2);
+        border-bottom:1px solid var(--line)}
   #chart{height:460px;width:100%}
   #rsichart{height:110px;width:100%}
   #equitychart{height:260px;width:100%}
@@ -63,38 +85,76 @@
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
         border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite}
   @keyframes sp{to{transform:rotate(360deg)}}
-  .scroll{max-height:420px;overflow:auto}
+  .scroll{max-height:470px;overflow:auto}
+  .sym{color:var(--accent);cursor:pointer;text-decoration:none;font-weight:700}
+  .sym:hover{text-decoration:underline}
   footer{padding:10px 18px;color:var(--muted);font-size:11.5px;border-top:1px solid var(--line)}
   a{color:var(--accent)}
 </style>
 </head>
 <body>
 <header>
-  <h1>tvlab</h1>
-  <span class="tag" id="srcTag">—</span>
-  <div class="row">
+  <div class="brand">
+    <h1>tvlab</h1>
+    <span class="tag" id="srcTag">—</span>
+  </div>
+  <div class="controls">
     <label class="mut">Market</label><select id="market"></select>
     <label class="mut">Style</label><select id="style"></select>
     <label class="mut">Strategy</label><select id="strategy"></select>
     <label class="mut">TF</label><select id="timeframe"></select>
     <label class="mut">Source</label><select id="datasource"></select>
-    <label class="mut">Symbol</label><select id="symbol"></select>
   </div>
-  <div class="row" style="margin-left:auto">
-    <button id="btnDaily" class="primary">Daily</button>
-    <button id="btnReview">Review journal</button>
-    <button id="btnSuggest" class="primary">Suggest</button>
+  <div class="actions">
+    <label class="mut">Universe</label><select id="universe"></select>
+    <label class="chk" title="append this run to output/daily/journal.jsonl">
+      <input type="checkbox" id="journal"> journal</label>
+    <button id="btnDaily" class="primary">Run briefing</button>
+    <button id="btnSuggest">Suggest</button>
     <button id="btnScan">Scan</button>
-    <button id="btnRun" class="primary">Run backtest</button>
+    <button id="btnReview">Journal review</button>
+    <button id="btnRun">Backtest</button>
     <button id="btnReport">Load report</button>
     <span id="busy" style="display:none"><span class="spin"></span></span>
   </div>
+  <div class="statusline">
+    <div id="status">starting …</div>
+    <div class="bar"><div id="barfill"></div></div>
+  </div>
 </header>
 
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="today">Today</button>
+  <button class="tab" data-tab="chart">Chart</button>
+  <button class="tab" data-tab="suggest">Suggestions</button>
+  <button class="tab" data-tab="scan">Scan</button>
+  <button class="tab" data-tab="journal">Journal</button>
+  <button class="tab" data-tab="backtest">Backtest</button>
+</nav>
+
 <main>
-  <div class="stack">
+  <!-- --------------------------------------------------------------- today -->
+  <section class="pane active" id="pane-today">
+    <div class="card">
+      <h2>Daily briefing — scan, rank, fundamental gates</h2>
+      <div class="hint">
+        Runs automatically on load. Click any symbol to chart it. The advisory above the
+        table says whether the strategy behind it has ever been validated.
+      </div>
+      <div class="body scroll"><div id="dailyTable" class="mut">Running the briefing …</div></div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------------- chart -->
+  <section class="pane" id="pane-chart">
     <div class="card">
       <h2 id="chartTitle">Chart</h2>
+      <div class="hint">
+        <span class="row">
+          <label class="mut">Symbol</label><select id="symbol"></select>
+          <span class="mut" id="chartNote"></span>
+        </span>
+      </div>
       <div class="body">
         <div id="chart"></div>
         <div id="rsichart"></div>
@@ -106,63 +166,69 @@
         </div>
       </div>
     </div>
+  </section>
 
-    <div class="card">
-      <h2>Portfolio equity</h2>
-      <div class="body"><div id="equitychart"></div></div>
-    </div>
-
-    <div class="card">
-      <h2>Daily briefing — scan, rank, fundamental gates</h2>
-      <div class="body scroll"><div id="dailyTable" class="mut">Press “Daily”.</div></div>
-    </div>
-
-    <div class="card">
-      <h2>Journal review — what past shortlists actually did</h2>
-      <div class="body scroll"><div id="reviewTable" class="mut">Press “Review journal”.</div></div>
-    </div>
-
+  <!-- ------------------------------------------------------------- suggest -->
+  <section class="pane" id="pane-suggest">
     <div class="card">
       <h2>Suggestions — ranked by R:R after costs</h2>
       <div class="body scroll"><div id="suggestTable" class="mut">Press “Suggest”.</div></div>
     </div>
+  </section>
 
+  <!-- ---------------------------------------------------------------- scan -->
+  <section class="pane" id="pane-scan">
     <div class="card">
       <h2>Scan — current setup state</h2>
       <div class="body scroll"><div id="scanTable" class="mut">Press “Scan”.</div></div>
     </div>
-  </div>
+  </section>
 
-  <div class="stack">
+  <!-- ------------------------------------------------------------- journal -->
+  <section class="pane" id="pane-journal">
     <div class="card">
-      <h2>Results</h2>
-      <div class="body">
-        <div id="verdict"></div>
-        <div id="kpis" class="grid2"></div>
-        <div id="warnbox"></div>
+      <h2>Journal review — what past shortlists actually did</h2>
+      <div class="body scroll"><div id="reviewTable" class="mut">Press “Journal review”.</div></div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------ backtest -->
+  <section class="pane" id="pane-backtest">
+    <div class="two">
+      <div class="stack">
+        <div class="card">
+          <h2>Portfolio equity</h2>
+          <div class="body"><div id="equitychart"></div></div>
+        </div>
+        <div class="card">
+          <h2>Exit reasons &amp; setups</h2>
+          <div class="body scroll" id="breakdown"><div class="mut">Press “Backtest”.</div></div>
+        </div>
+      </div>
+      <div class="stack">
+        <div class="card">
+          <h2>Results</h2>
+          <div class="body">
+            <div id="verdict"></div>
+            <div id="kpis" class="grid2"></div>
+            <div id="warnbox"></div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Risk mandate</h2>
+          <div class="body" id="riskBox"></div>
+        </div>
+        <div class="card">
+          <h2>Per symbol</h2>
+          <div class="body scroll" id="perSymbol"></div>
+        </div>
+        <div class="card">
+          <h2>Validity checks</h2>
+          <div class="body scroll" id="checks"><div class="mut">Press “Load report”.</div></div>
+        </div>
       </div>
     </div>
-
-    <div class="card">
-      <h2>Risk mandate</h2>
-      <div class="body" id="riskBox"></div>
-    </div>
-
-    <div class="card">
-      <h2>Per symbol</h2>
-      <div class="body scroll" id="perSymbol"></div>
-    </div>
-
-    <div class="card">
-      <h2>Exit reasons &amp; setups</h2>
-      <div class="body scroll" id="breakdown"></div>
-    </div>
-
-    <div class="card">
-      <h2>Validity checks</h2>
-      <div class="body scroll" id="checks"></div>
-    </div>
-  </div>
+  </section>
 </main>
 
 <footer>
@@ -174,7 +240,8 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const state = { cfg:null, chart:null, candle:null, volume:null, rsiChart:null, rsiLine:null,
-                eqChart:null, eqLine:null, series:[], markers:[] };
+                eqChart:null, eqLine:null, series:[], marks:null, chartLoaded:false,
+                backtestLoaded:false, statusOwner:null };
 
 // reasons and warnings come from our own code but carry user-visible text
 const escapeHtml = (t)=> String(t==null?'':t)
@@ -195,6 +262,68 @@ async function api(path, opts){
 const busy = (on)=> { $('busy').style.display = on?'inline-block':'none'; };
 function showErr(where, e){ $(where).innerHTML = `<div class="err">${e.message||e}</div>` }
 
+// -------------------------------------------------------------------- progress
+// One status line for the whole page. A 500-name NSE scan is 1,500 HTTP requests
+// and takes over a minute; without this the button just looks broken.
+function setStatus(text, frac, tone){
+  $('status').textContent = text;
+  const fill = $('barfill');
+  const f = (frac===null||frac===undefined||!isFinite(frac)) ? null
+            : Math.max(0, Math.min(1, frac));
+  fill.style.width = f===null ? '0%' : `${(f*100).toFixed(1)}%`;
+  fill.className = tone || '';
+}
+function showProgress(j){
+  const t = j.total ? ` · ${j.done}/${j.total}` : '';
+  const f = j.total ? j.done/j.total : null;
+  setStatus(`${j.kind}: ${j.message || j.state}${t} · ${j.elapsed_seconds||0}s`,
+            f, j.state==='error' ? 'bad' : '');
+}
+
+// Start work on the server and wait for it, showing progress. The server answers
+// immediately with a job id because a 500-name scan cannot finish inside a render.
+async function jobRun(kind, params){
+  const start = await api('/api/jobs', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({kind, params: params||{}})});
+  // A server that answered with the payload itself (a build without the job
+  // routes, or a proxy that did not pass them through) is still usable.
+  if(!start || !start.id) return start;
+
+  // The newest job owns the status line. Two runs can overlap (a backtest while a
+  // scan is going), and without this the bar jumps between two unrelated jobs.
+  state.statusOwner = start.id;
+  for(let i=0;i<3600;i++){
+    const j = await api(`/api/jobs/${encodeURIComponent(start.id)}`);
+    const owns = state.statusOwner === j.id;
+    if(owns) showProgress(j);
+    if(j.state === 'done'){
+      const note = (j.result && j.result.universe) || '';
+      if(owns) setStatus(`${kind} finished in ${j.elapsed_seconds}s${note?' · '+note:''}`, 1, 'good');
+      if(j.result) noteSymbols(j.result);
+      return j.result;
+    }
+    if(j.state === 'error') throw new Error(j.error || `${kind} failed`);
+    await new Promise(r=>setTimeout(r, 600));
+  }
+  throw new Error('the job did not finish in 36 minutes');
+}
+
+// Symbols that a scan turned up may not be in the configured list (the exchange
+// lists 500+ names, the config ships 12). Add them so the chart can show them.
+function noteSymbols(res){
+  const rows = (res && (res.shortlist || res.candidates || res.rows)) || [];
+  const sel = $('symbol');
+  if(!sel || !sel.options) return;
+  const have = new Set(Array.from(sel.options).map(o=>o.value));
+  for(const x of rows){
+    const s = x && x.symbol;
+    if(!s || have.has(s)) continue;
+    const o = document.createElement('option'); o.value = s; o.textContent = s;
+    sel.appendChild(o); have.add(s);
+  }
+}
+
 // ------------------------------------------------------------------- bootstrap
 async function boot(){
   try{
@@ -202,11 +331,12 @@ async function boot(){
   }catch(e){ document.body.innerHTML = `<div class="err" style="margin:20px">${e.message}</div>`; return }
   const c = state.cfg, av = c.available;
   fill('market', av.markets, c.market);
-  fill('style', av.styles, 'swing');
+  fill('style', av.styles, c.style || 'swing');
   fill('strategy', av.strategies, c.strategy.name);
   fill('timeframe', av.timeframes, c.timeframe.execution);
   fill('datasource', av.data_sources, c.data_source);
   fill('symbol', c.symbols, c.symbols[0]);
+  fillUniverse(c);
   $('srcTag').textContent = `${c.market} · ${c.timeframe.execution} · ${c.data_source}`;
   renderRisk(c);
   for(const id of ['market','style','strategy','timeframe','datasource'])
@@ -218,8 +348,18 @@ async function boot(){
   $('btnSuggest').addEventListener('click', runSuggest);
   $('btnScan').addEventListener('click', runScan);
   $('btnReport').addEventListener('click', loadReport);
-  await loadChart();
-  await runBacktest();
+  for(const b of document.querySelectorAll('.tab'))
+    b.addEventListener('click', ()=>showTab(b.dataset.tab));
+  document.addEventListener('click', (e)=>{
+    const a = e.target && e.target.closest ? e.target.closest('[data-symbol]') : null;
+    if(!a) return;
+    e.preventDefault();
+    pickSymbol(a.getAttribute('data-symbol'));
+  });
+  setStatus(`ready · ${c.market} · ${c.data_source}`, 0);
+  // The point of the dashboard: it answers "what does today look like" without
+  // being told to. The job runs server-side, so this only starts it.
+  runDaily();
 }
 function fill(id, opts, cur){
   const el = $(id); el.innerHTML='';
@@ -227,6 +367,43 @@ function fill(id, opts, cur){
     const e=document.createElement('option'); e.value=o; e.textContent=o;
     if(o===cur) e.selected=true; el.appendChild(e);
   }
+}
+function fillUniverse(c){
+  const el = $('universe');
+  const n = (c.universe && c.universe.config_symbols) || (c.symbols||[]).length;
+  const opts = [
+    ['auto', 'auto — the exchange listing when the source can list'],
+    ['source', 'source listing'],
+    ['config', `config list (${n} names)`],
+  ];
+  el.innerHTML='';
+  for(const [v,label] of opts){
+    const o=document.createElement('option'); o.value=v; o.textContent=label;
+    if(v==='auto') o.selected=true; el.appendChild(o);
+  }
+}
+function showTab(name){
+  for(const b of document.querySelectorAll('.tab'))
+    b.classList.toggle('active', b.dataset.tab === name);
+  for(const p of document.querySelectorAll('.pane'))
+    p.classList.toggle('active', p.id === `pane-${name}`);
+  if(name === 'chart'){
+    if(!state.chartLoaded){ state.chartLoaded = true; loadChart(); }
+  }
+  if(name === 'backtest' && !state.backtestLoaded){
+    state.backtestLoaded = true;
+    runBacktest();
+  }
+}
+function pickSymbol(sym){
+  const sel = $('symbol');
+  if(sym && sel && sel.options && !Array.from(sel.options).some(o=>o.value===sym)){
+    const o=document.createElement('option'); o.value=sym; o.textContent=sym; sel.appendChild(o);
+  }
+  if(sym && sel) sel.value = sym;
+  if(!state.chartLoaded){ state.chartLoaded = true; }
+  showTab('chart');
+  loadChart();
 }
 async function onConfigChange(){
   busy(true);
@@ -240,8 +417,9 @@ async function onConfigChange(){
     fill('symbol', c.symbols, c.symbols[0]);
     $('srcTag').textContent = `${c.market} · ${c.timeframe.execution} · ${c.data_source}`;
     renderRisk(c);
-    await loadChart(); await runBacktest();
-  }catch(e){ showErr('warnbox', e) } finally { busy(false) }
+    if(state.chartLoaded) await loadChart();
+    setStatus(`config changed to ${c.market} / ${c.strategy.name} · press Run briefing`, 0);
+  }catch(e){ showErr('dailyTable', e) } finally { busy(false) }
 }
 function renderRisk(c){
   const r=c.risk, k=c.costs;
@@ -269,9 +447,18 @@ function mkChart(el, opts={}){
     autoSize:true,
   }, opts));
 }
+// The vendored build is lightweight-charts 5.x, where the per-type helpers
+// (addLineSeries, addCandlestickSeries, addAreaSeries) are gone: everything is
+// chart.addSeries(SeriesDefinition, options) and markers are a plugin. The calls
+// below used the v3/v4 API, so every series threw and the pane stayed empty.
+const LWC = window.LightweightCharts;
+const seriesOf = (chart, kind, opts) => chart.addSeries(LWC[kind], opts);
+
 function addLine(chart, color, width=1.5, title=''){
-  const s = chart.addLineSeries({color,lineWidth:width,title,priceLineVisible:false,
-                                 lastValueVisible:false,crosshairMarkerVisible:false});
+  const s = seriesOf(chart, 'LineSeries', {color,lineWidth:width,title,
+                                           priceLineVisible:false,
+                                           lastValueVisible:false,
+                                           crosshairMarkerVisible:false});
   state.series.push(s); return s;
 }
 
@@ -285,13 +472,15 @@ async function loadChart(){
       api(`/api/indicators?symbol=${encodeURIComponent(sym)}&timeframe=${tf}&limit=1200`),
     ]);
     $('srcTag').textContent = `${state.cfg.market} · ${tf} · ${d.source}`;
+    $('chartNote').textContent = `${d.bars} bars · source ${d.source}`;
 
     if(!state.chart){
       state.chart = mkChart($('chart'));
-      state.candle = state.chart.addCandlestickSeries({
+      state.candle = seriesOf(state.chart, 'CandlestickSeries', {
         upColor:'#16a34a',downColor:'#dc2626',borderUpColor:'#16a34a',
         borderDownColor:'#dc2626',wickUpColor:'#4ade80',wickDownColor:'#f87171'});
-      state.volume = state.chart.addHistogramSeries({priceFormat:{type:'volume'},
+      state.marks = LWC.createSeriesMarkers(state.candle, []);
+      state.volume = seriesOf(state.chart, 'HistogramSeries', {priceFormat:{type:'volume'},
         priceScaleId:'vol',color:'rgba(79,140,255,.35)'});
       state.chart.priceScale('vol').applyOptions({scaleMargins:{top:.86,bottom:0}});
       state.ema21 = addLine(state.chart,'#f59e0b',1,'EMA21');
@@ -318,34 +507,37 @@ async function loadChart(){
       marks.push({time:p.time,position:'belowBar',color:'rgba(74,222,128,.75)',
                   shape:'circle',text:''});
     marks.sort((a,b)=>a.time-b.time);
-    state.candle.setMarkers(marks);
+    state.marks.setMarkers(marks);
     state.chart.timeScale().fitContent();
 
     if(!state.rsiChart){
       state.rsiChart = mkChart($('rsichart'),{rightPriceScale:{borderColor:'#22304f'}});
-      state.rsiLine = state.rsiChart.addLineSeries({color:'#4f8cff',lineWidth:1.2,title:'RSI14'});
-      state.rsiChart.addLineSeries({color:'rgba(220,38,38,.5)',lineWidth:1})
-          .setData([]); // placeholder for band lines
-      state.rsiHi = state.rsiChart.addLineSeries({color:'rgba(220,38,38,.45)',lineWidth:1});
-      state.rsiLo = state.rsiChart.addLineSeries({color:'rgba(22,163,74,.45)',lineWidth:1});
+      state.rsiLine = seriesOf(state.rsiChart, 'LineSeries',
+                               {color:'#4f8cff',lineWidth:1.2,title:'RSI14'});
+      state.rsiHi = seriesOf(state.rsiChart, 'LineSeries',
+                             {color:'rgba(220,38,38,.45)',lineWidth:1});
+      state.rsiLo = seriesOf(state.rsiChart, 'LineSeries',
+                             {color:'rgba(22,163,74,.45)',lineWidth:1});
     }
     state.rsiLine.setData(ind.rsi||[]);
     const t=(ind.rsi||[]).map(p=>p.time);
     state.rsiHi.setData(t.map(x=>({time:x,value:70})));
     state.rsiLo.setData(t.map(x=>({time:x,value:30})));
     state.rsiChart.timeScale().setVisibleRange(state.chart.timeScale().getVisibleRange());
-  }catch(e){ showErr('warnbox', e) } finally { busy(false) }
+  }catch(e){ showErr('dailyTable', e) } finally { busy(false) }
 }
 
 // -------------------------------------------------------------------- backtest
 async function runBacktest(){
   busy(true); $('warnbox').innerHTML='';
+  setStatus('backtest: running', null);
   try{
     const r = await api(`/api/backtest?strategy=${$('strategy').value}&timeframe=${$('timeframe').value}`);
     renderMetrics(r);
     renderEquity(r.equity||[]);
     renderPerSymbol(r.per_symbol||[]);
     renderBreakdown(r.metrics||{});
+    setStatus(`backtest: ${r.strategy} on ${r.market} ${r.timeframe} · ${(r.metrics||{}).n_trades||0} trade(s)`, 1);
   }catch(e){ showErr('warnbox', e) } finally { busy(false) }
 }
 
@@ -401,7 +593,7 @@ function renderMetrics(r){
 function renderEquity(eq){
   if(!state.eqChart){
     state.eqChart = mkChart($('equitychart'));
-    state.eqLine = state.eqChart.addAreaSeries({
+    state.eqLine = seriesOf(state.eqChart, 'AreaSeries', {
       lineColor:'#4f8cff',topColor:'rgba(79,140,255,.35)',bottomColor:'rgba(79,140,255,.03)',
       lineWidth:2});
   }
@@ -455,7 +647,9 @@ async function runDaily(){
   busy(true);
   try{
     const tf = $('timeframe').value;
-    const r = await api(`/api/daily?timeframe=${tf}&fundamentals=1`);
+    const r = await jobRun('daily', {timeframe: tf, universe: $('universe').value,
+                                     fundamentals: true,
+                                     journal: !!($('journal') && $('journal').checked)});
 
     // The advisory leads, always. A panel that rendered the ranked table first and
     // mentioned validity afterwards would already have framed an unvalidated
@@ -538,7 +732,8 @@ async function runDaily(){
                 : (x.days_to_earnings<=14
                     ? `<b style="color:#f5a623">${x.days_to_earnings}d</b>`
                     : `${x.days_to_earnings}d`);
-      h += `<tr><td>${i+1}</td><td><b>${escapeHtml(x.symbol)}</b></td>
+      h += `<tr><td>${i+1}</td>
+            <td><a href="#" class="sym" data-symbol="${escapeHtml(x.symbol)}">${escapeHtml(x.symbol)}</a></td>
             <td>${x.side==='long'?'<span class="pos">long</span>':'<span class="neg">short</span>'}</td>
             <td>${fmt(x.last,4)}</td><td>${fmt(x.stop,4)}</td><td>${fmt(x.target,4)}</td>
             <td>${fmt(x.rr,2)}</td><td>${fmt(x.risk_pct*100,2)}</td>
@@ -574,6 +769,7 @@ async function runDaily(){
 // ---------------------------------------------------------------------- review
 async function runReview(){
   busy(true);
+  setStatus('review: replaying the journal', null);
   try{
     const tf = $('timeframe').value;
     const r = await api(`/api/review?horizon=90&timeframe=${tf}`);
@@ -586,6 +782,7 @@ async function runReview(){
         `<div class="note"><b>Nothing to review yet.</b><br>
          <span class="mut">${escapeHtml(r.detail||'')}</span><br>
          <span class="mut">${escapeHtml(r.next_step||'')}</span></div>`;
+      setStatus('review: no journal yet', 0);
       return;
     }
 
@@ -696,6 +893,7 @@ async function runReview(){
     }
 
     $('reviewTable').insertAdjacentHTML('beforeend', h);
+    setStatus(`review: ${r.coverage||''}`, 1);
   }catch(e){ showErr('reviewTable', e) } finally { busy(false) }
 }
 
@@ -715,7 +913,10 @@ async function runSuggest(){
   busy(true);
   try{
     const tf = $('timeframe').value;
-    const r = await api(`/api/suggest?timeframe=${tf}&trendlines=1`);
+    // trendlines stay off: fitting them is ~27 ms per symbol across 500 names and
+    // this table has no column that shows them.
+    const r = await jobRun('suggest', {timeframe: tf, universe: $('universe').value,
+                                       trendlines: false});
 
     let h = `<div class="note" style="margin-bottom:8px">
       round-trip cost <b>${fmt(r.round_trip_cost_bps,1)} bp</b> · scanned
@@ -829,7 +1030,8 @@ async function runSuggest(){
       const verdict = pass===null ? '<span class="mut">no study</span>'
                     : pass ? '<span class="pill long">PASS</span>'
                            : '<span class="pill short">FAIL</span>';
-      h += `<tr><td>${i+1}</td><td><b>${x.symbol}</b></td>
+      h += `<tr><td>${i+1}</td>
+            <td><a href="#" class="sym" data-symbol="${escapeHtml(x.symbol)}">${escapeHtml(x.symbol)}</a></td>
             <td>${x.side==='long'?'<span class="pos">long</span>':'<span class="neg">short</span>'}</td>
             <td>${fmt(x.last,4)}</td><td>${fmt(x.stop,4)}</td><td>${fmt(x.target,4)}</td>
             <td>${fmt(x.rr,2)}</td><td>${fmt(x.risk_pct*100,2)}</td>
@@ -862,13 +1064,15 @@ async function runSuggest(){
 async function runScan(){
   busy(true);
   try{
-    const r = await api(`/api/scan?timeframe=${$('timeframe').value}`);
+    const r = await jobRun('scan', {timeframe: $('timeframe').value,
+                                    universe: $('universe').value});
     if(!r.rows.length){ $('scanTable').innerHTML='<div class="mut">no symbols scanned</div>'; return }
     const pill=(s)=> s>0?'<span class="pill long">LONG</span>':
                      s<0?'<span class="pill short">SHORT</span>':'<span class="pill flat">—</span>';
     const trend=(t)=> t>0?'<span class="pos">up</span>':t<0?'<span class="neg">down</span>':'<span class="mut">flat</span>';
     let h=`<div class="note" style="margin-bottom:8px">${r.live_signals} live signal(s) across
-           ${r.rows.length} symbols · strategy <code>${r.strategy}</code> · ${r.timeframe}</div>`;
+           ${r.n_rows||r.rows.length} symbols · strategy <code>${r.strategy}</code> · ${r.timeframe}`
+        + `</div>`;
     h+='<table><tr><th>Symbol</th><th>Last</th><th>Chg%</th><th>Trend</th><th>ADX</th><th>RSI</th>'+
        '<th>ATR%</th><th>Sweep</th><th>Age</th><th>Zone</th><th>Signal</th><th>R:R</th></tr>';
     for(const x of r.rows){
@@ -878,7 +1082,8 @@ async function runScan(){
                 : (x.trend>0 ? x.bull_sweep_age : x.bear_sweep_age);
       const zone = x.zones && x.zones!=='-' ? x.zones
                  : ([x.in_fvg?'FVG':'',x.in_ob?'OB':''].filter(Boolean).join('+')||'');
-      h+=`<tr><td><b>${x.symbol}</b></td><td>${fmt(x.last,4)}</td>
+      h+=`<tr><td><a href="#" class="sym" data-symbol="${escapeHtml(x.symbol)}">${escapeHtml(x.symbol)}</a></td>
+          <td>${fmt(x.last,4)}</td>
           <td class="${cls(x.change_pct)}">${fmt(x.change_pct,2)}</td>
           <td>${trend(x.trend)}</td><td>${fmt(x.adx,1)}</td><td>${fmt(x.rsi,1)}</td>
           <td>${fmt(x.atr_pct,2)}</td>

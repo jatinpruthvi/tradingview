@@ -30,6 +30,18 @@ YF_INTERVALS = {
     "60m": "1h", "1h": "1h", "1d": "1d", "1D": "1d", "1w": "1wk",
 }
 
+#: Period to request when the caller passes neither dates nor a bar count.
+#:
+#: yfinance's own default is ``period="1mo"``, which for daily bars is ~22 rows -
+#: below the store's 60-bar floor and far short of a 1200-bar scan window, so every
+#: caller that did not pin dates silently lost its higher-timeframe bias history
+#: (the trend filter then disabled itself instead of complaining). Each value is the
+#: longest history the interval is actually allowed to serve.
+YF_DEFAULT_PERIOD = {
+    "1m": "5d", "2m": "1mo", "5m": "1mo", "15m": "2mo", "30m": "2mo",
+    "1h": "2y", "1d": "5y", "1wk": "10y",
+}
+
 
 def _require(module: str, pip_name: Optional[str] = None):
     try:
@@ -224,18 +236,35 @@ class YFinanceSource:
     ) -> pd.DataFrame:
         interval = YF_INTERVALS.get(timeframe)
         if interval is None:
-            # resample up from the closest supported interval
-            base = "1d" if _tf_seconds(timeframe) >= 86400 else "1h"
-            df = self._download(symbol, base, start, end)
+            # resample up from the closest supported interval. The base fetch has to
+            # ask for proportionally more bars than `limit`: the limit counts bars of
+            # the *requested* timeframe, and without this the request fell through to
+            # yfinance's 1-month default, handing a 1200-bar 4h scan ~130 bars.
+            tf_secs = _tf_seconds(timeframe)
+            base = "1d" if tf_secs >= 86400 else "1h"
+            extra: Dict[str, object] = {}
+            if not start and not end:
+                if limit:
+                    ratio = max(tf_secs / _tf_seconds(base), 1.0)
+                    extra["period"] = _period_for(max(int(round(limit * ratio)), limit), base)
+                else:
+                    extra["period"] = YF_DEFAULT_PERIOD.get(YF_INTERVALS[base], "1y")
+            df = self._download(symbol, base, start, end, **extra)
             return validate_ohlcv(resample(df, timeframe), symbol)
 
-        kwargs: Dict[str, object] = {"interval": interval, "auto_adjust": self.adjust != "raw"}
+        # Only `interval` is positional in the _download call below. `start`/`end`
+        # belong in kwargs: they used to be passed both ways, which raised TypeError
+        # before any HTTP request, so every dated fetch failed.
+        kwargs: Dict[str, object] = {"auto_adjust": self.adjust != "raw"}
         if start:
             kwargs["start"] = start
         if end:
             kwargs["end"] = end
-        if not start and limit:
-            kwargs["period"] = _period_for(limit, timeframe)
+        if not start:
+            if limit:
+                kwargs["period"] = _period_for(limit, timeframe)
+            elif not end:
+                kwargs["period"] = YF_DEFAULT_PERIOD.get(interval, "1y")
         cap_days = self.INTRADAY_LIMIT_DAYS.get(interval)
         if cap_days and start:
             s = pd.Timestamp(start, tz="UTC") if pd.Timestamp(start).tz is None else pd.Timestamp(start)
@@ -246,7 +275,7 @@ class YFinanceSource:
                     "Use a paid vendor or broker export for longer intraday history.",
                     interval, cap_days, s.date(), e.date(),
                 )
-        df = self._download(symbol, None, start, end, **kwargs)
+        df = self._download(symbol, interval, **kwargs)
         df = validate_ohlcv(df, symbol)
         return slice_range(df, start, end, limit)
 
