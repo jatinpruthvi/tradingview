@@ -152,6 +152,56 @@ day traders finds them losing in every one of seven years, at -3.8 bp per trade.
 positive expectancy with a 40 % daily hit rate is the realistic shape; a rule that
 is green every day is not.
 
+**NSE delivery percentage** (measured; `data/delivery.py` added and no strategy
+reads it): the ORB relative-volume filter failed as lookahead, and delivery % is
+the replacement that cannot be peeked at - NSE publishes it in the evening
+bhavcopy, so for session D it is knowable before D+1 opens and never during D.
+60 most-liquid NSE names x 245 sessions (14,629 symbol-days, 100 % join coverage),
+Yahoo's adjusted prices with only NSE's two columns joined on:
+
+| question | IC | t | verdict |
+|---|---:|---:|---|
+| yesterday's delivery % -> today open-to-close | +0.045 | +3.77 | not tradeable |
+| yesterday's delivery % -> today's opening gap | -0.117 | -10.04 | not tradeable |
+| yesterday's delivery % -> today's high-low range | **-0.375** | **-39.14** | gating / sizing |
+| same-day delivery % -> same-day range (control) | -0.465 | -52.56 | not tradeable |
+
+**Direction: no.** The quintile ladder by yesterday's delivery is -4.6 / -8.4 /
+-0.5 / +3.4 / +1.3 bp open-to-close: no ordering, and the best bucket is not the
+top one. Q5-Q1 is +5.8 bp gross (t=0.95) and -26.2 bp net of two round trips; the
+long-only top quintile is +1.3 bp gross and -14.8 bp net (t=0.26). Up-rates are
+48.0 % top versus 46.1 % bottom against a 47.4 % universe. The statistically
+detectable +0.045 IC is carried by the middle of the distribution, not by a
+tradeable extreme. The split-half spread is stable (+5.5 then +6.2 bp), which
+rules out instability but not unprofitability.
+
+**Range: yes, and it is not just volatility clustering.** High delivery yesterday
+means a *quieter* session today, monotonically: 357 / 284 / 254 / 232 / 214 bp
+from the bottom to the top quintile, a -143 bp spread at t=-31. The obvious
+objection is that delivery % merely proxies yesterday's range, and volatility
+clusters (yesterday's range onto today's: IC +0.41, t=46). A double sort removes
+that explanation: inside each yesterday's-range quintile, splitting on delivery
+still separates today's range by -20 / -33 / -42 / -48 / -72 bp (t -5.7 to -9.5),
+and the effect *grows* in the wider-range buckets rather than flattening. The
+same-session control says what the variable is: delivery accumulates on quiet,
+accumulative days and is thin on churny ones.
+
+**What it is good for.** Not an entry signal and not a way to be profitable
+daily. It is a forecast of the session's expected range, which is the missing
+input to two decisions this project makes badly today: whether a range-dependent
+rule has enough range to pay its 16 bp (ORB's opening range has to be wide enough
+to clear it), and how large the position should be. That is the next measurement,
+and it needs 5m bars for the opening range, so it inherits the 60-day cap until a
+longer intraday source is wired in.
+
+**Caveats.** One year, one regime; the universe is *today's* most-liquid 60 names
+(survivorship and liquidity bias); prices are Yahoo-adjusted while delivery comes
+from NSE, so the ratio is trustworthy but the two series are never compared
+bar-for-bar; "range" is the full-session high-low and includes the opening range
+ORB actually trades; and 100 % coverage is a property of these 60 liquid names,
+not of NSE.
+
+
 ---
 
 ## Tier 1 — fixes to the measurement itself (do before anything else)
@@ -235,6 +285,15 @@ drift given up, t=1.56), and the equal-weight basket loses to cost at both clock
   (`backtest/engine.py`). Additive and off unless a strategy sets it; stops and
   targets still take precedence, because they are intrabar events that happen
   before the closing print.
+
+- **NSE delivery source** - `data/delivery.py`, registered as
+  `--data-source nse_delivery` behind an optional `delivery` extra
+  (`jugaad-data`). Joins `_delivery_pct` and `_avg_trade_value` onto the
+  existing adjusted price series by session date, never forward-fills a missing
+  bhavcopy, and reports the matched share in `attrs`. 17 tests, including the
+  18:30-UTC date stamp and the duplicate `T0` rows that a naive join reads as
+  two sessions per day. Nothing in `strategy/` reads it yet: see the range
+  finding above for why, and what would have to be built first.
 
 Nothing in Tier 2 or Tier 3 is implemented. That is deliberate, and the
 measurement of the two exit rules is the argument for it.

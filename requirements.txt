@@ -48,5 +48,15 @@ smartmoneyconcepts>=0.0.27
 # the package is not required to run backtests on your own data.
 tvscreener>=0.8
 
+# ------------------------------------------------------------- NSE delivery data
+# Daily DELIVERY % and trade counts from NSE's bhavcopy, joined onto the adjusted
+# price series by tvlab.data.delivery. Optional in the same way as the live
+# extras: the import is lazy and names this line when it is missing. Daily only -
+# it has no intraday history, so it cannot extend a 5m backtest.
+#
+# License note: jugaad-data ships a non-standard "YOLO" license (LICENSE.YOLO.md
+# upstream), not MIT. It is used here as a dependency, not vendored.
+jugaad-data>=0.37
+
 # ---------------------------------------------------------------------- testing
 pytest>=8.0

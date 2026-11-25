@@ -35,8 +35,12 @@ reference = ["smartmoneyconcepts>=0.0.27"]
 screener = ["tvscreener>=0.8"]
 # Live market data. Not needed for development, backtesting or validation.
 live = ["ccxt>=4.2", "yfinance>=0.2.40"]
+# NSE delivery % and average trade size, joined onto prices (data/delivery.py).
+# Daily only - jugaad-data has no intraday history. Optional: import is lazy and
+# raises a DataError naming this extra when the package is missing.
+delivery = ["jugaad-data>=0.37"]
 test = ["pytest>=8.0"]
-all = ["tvlab[reference,screener,live,test]"]
+all = ["tvlab[reference,screener,live,delivery,test]"]
 
 [project.scripts]
 tvlab = "tvlab.cli:cli"

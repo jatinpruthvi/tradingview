@@ -152,10 +152,19 @@ class DataStore:
             from .nse import YahooChartSource
 
             src = YahooChartSource(market=self.cfg.universe.market)
+        elif name in ("nse_delivery", "nse-delivery", "delivery"):
+            # Prices from the usual adjusted source; NSE's bhavcopy columns are
+            # joined on top. Optional dependency, so it fails with an install
+            # hint rather than at import time.
+            from .delivery import DeliveryAugmentedSource
+
+            src = DeliveryAugmentedSource(self._build_source("nse"),
+                                          market=self.cfg.universe.market)
         else:
             raise DataError(
                 f"unknown data source {name!r}. "
-                f"Options: synthetic, csv, ccxt, yfinance, tvscreener, nse, yahoo_chart"
+                f"Options: synthetic, csv, ccxt, yfinance, tvscreener, nse, yahoo_chart, "
+                f"nse_delivery"
             )
         self._sources[name] = src
         return src

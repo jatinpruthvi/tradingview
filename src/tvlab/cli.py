@@ -161,7 +161,7 @@ def markets() -> None:
 @click.option("--symbols", default=None, help="comma-separated, overrides the config")
 @click.option("--data-source", default=None,
               type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
-                                  "nse", "yahoo_chart"]))
+                                  "nse", "yahoo_chart", "nse_delivery"]))
 @click.option("--timeframe", default=None)
 @click.option("--limit", type=int, default=None)
 @click.option("--export", type=click.Path(path_type=Path), default=None,
@@ -277,7 +277,7 @@ def _measured_win_rate(cfg: AppConfig, strategy_name: Optional[str]) -> Optional
 @click.option("--symbols", default=None)
 @click.option("--data-source", default=None,
               type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
-                                  "nse", "yahoo_chart"]))
+                                  "nse", "yahoo_chart", "nse_delivery"]))
 @click.option("--timeframe", default=None)
 @click.option("--top", type=int, default=10, help="how many candidates to show")
 @click.option("--max-breakeven", type=float, default=0.60, show_default=True,
@@ -519,7 +519,8 @@ def suggest(market, style, config, set_pairs, symbols, data_source, timeframe, t
 @click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
 @click.option("--symbols", default=None)
 @click.option("--data-source", default=None,
-              help="synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart")
+              help="synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart | "
+                      "nse_delivery")
 @click.option("--timeframe", default=None)
 @click.option("--top", type=int, default=10, help="how many ideas to show")
 @click.option("--max-breakeven", type=float, default=0.60, show_default=True,
@@ -802,7 +803,8 @@ def _mcap(v: Optional[float], symbol: str) -> str:
 @click.option("--config", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
 @click.option("--data-source", default=None,
-              help="synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart")
+              help="synthetic | csv | ccxt | yfinance | tvscreener | nse | yahoo_chart | "
+                      "nse_delivery")
 @click.option("--timeframe", default=None,
               help="replay every run at this timeframe instead of the one it recorded")
 @click.option("--horizon", type=int, default=90, show_default=True,
@@ -1066,7 +1068,7 @@ def review_journal(market, style, config, set_pairs, data_source, timeframe,
 @click.option("--symbols", default=None)
 @click.option("--data-source", default=None,
               type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
-                                  "nse", "yahoo_chart"]))
+                                  "nse", "yahoo_chart", "nse_delivery"]))
 @click.option("--screener", is_flag=True,
               help="build the universe from the TradingView screener first")
 @click.option("--timeframe", default=None)
@@ -1212,7 +1214,7 @@ def scan(market, style, config, set_pairs, symbols, data_source, screener, timef
 @click.option("--strategy", "strategy_name", default=None)
 @click.option("--data-source", default=None,
               type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
-                                  "nse", "yahoo_chart"]))
+                                  "nse", "yahoo_chart", "nse_delivery"]))
 @click.option("--timeframe", default=None)
 @click.option("--limit", type=int, default=None)
 @click.option("--out", type=click.Path(path_type=Path), default=None)
@@ -1270,7 +1272,7 @@ def backtest(market, style, config, set_pairs, symbols, strategy_name, data_sour
 @click.option("--strategy", "strategy_name", default=None)
 @click.option("--data-source", default=None,
               type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
-                                  "nse", "yahoo_chart"]))
+                                  "nse", "yahoo_chart", "nse_delivery"]))
 @click.option("--out", type=click.Path(path_type=Path), default=None)
 @click.option("--no-walk-forward", is_flag=True)
 @click.option("--no-monte-carlo", is_flag=True)
@@ -1375,7 +1377,7 @@ def study(market, style, config, set_pairs, symbols, strategy_name, data_source,
 @click.option("--symbols", default=None)
 @click.option("--data-source", default=None,
               type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
-                                  "nse", "yahoo_chart"]))
+                                  "nse", "yahoo_chart", "nse_delivery"]))
 @click.option("--strategies", default=None,
               help="comma-separated; default is all registered")
 def compare(market, style, config, set_pairs, symbols, data_source, strategies) -> None:
