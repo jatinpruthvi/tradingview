@@ -288,18 +288,36 @@ class AppConfig:
     def merge(self, overrides: Dict[str, Any]) -> "AppConfig":
         """Return a new config with ``overrides`` applied (dotted keys allowed).
 
-        Setting ``strategy.name`` without also setting params marks the existing
-        params as belonging to the *old* strategy, so they are not reused.
+        A bare ``strategy.name`` change marks the existing params as belonging to
+        the *old* strategy, so they are not reused. Params supplied *with* a name
+        change say something different: they were written for the strategy now
+        named, so ``params_for`` follows the new name. They also replace the old
+        params instead of merging into them - a per-key dotted override would
+        otherwise leave the old setup's values behind for every key the two
+        strategies share (``r_multiple``, ``atr_period``), and ``build_strategy``
+        would either discard the supplied values as stale or silently apply a mix
+        of two strategies' parameters.
         """
+        overrides = dict(overrides or {})
         raw = _to_plain(asdict(self))
-        for key, value in (overrides or {}).items():
+        for key, value in overrides.items():
             _deep_set(raw, key, value)
         strat = raw.get("strategy") or {}
-        touched_params = any(k.startswith("strategy.params") for k in (overrides or {}))
-        if (strat.get("name") != strat.get("params_for") and not touched_params
-                and "strategy.params_for" not in (overrides or {})):
-            # keep params_for pointing at the strategy that declared them
-            strat.setdefault("params_for", self.strategy.params_for or self.strategy.name)
+        prefix = "strategy.params."
+        param_keys = [k for k in overrides if k.startswith(prefix)]
+        touched_params = bool(param_keys) or "strategy.params" in overrides
+        renamed = strat.get("name") != self.strategy.name
+        # params that were written for a strategy this config no longer runs
+        stale = (self.strategy.params_for or self.strategy.name) != self.strategy.name
+        if "strategy.params_for" not in overrides:
+            if touched_params:
+                if param_keys and (renamed or stale):
+                    # the supplied keys are the whole payload for the new strategy
+                    strat["params"] = {k[len(prefix):]: overrides[k] for k in param_keys}
+                strat["params_for"] = strat.get("name")
+            elif strat.get("name") != strat.get("params_for"):
+                # keep params_for pointing at the strategy that declared them
+                strat.setdefault("params_for", self.strategy.params_for or self.strategy.name)
             raw["strategy"] = strat
         cfg = AppConfig(
             style=raw.get("style", self.style),

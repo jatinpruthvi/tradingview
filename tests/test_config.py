@@ -128,6 +128,68 @@ def test_params_for_prevents_cross_strategy_leakage():
     assert out.strategy.params_for != "buy_and_hold"
 
 
+def test_params_given_with_a_new_name_replace_the_old_ones_and_belong_to_it():
+    """``--set strategy.name=X strategy.params.k=v`` writes params FOR X.
+
+    Two silent failures were possible here. ``params_for`` stayed on the old
+    strategy, so ``build_strategy`` treated the supplied values as stale and ran
+    X's defaults. And the dotted overrides were merged into the OLD params dict,
+    so every key the two strategies share would have carried the old setup's value
+    into X once ``params_for`` was corrected.
+    """
+    from tvlab.pipeline import build_strategy
+
+    cfg = load_config(market="crypto", style="swing")
+    assert cfg.strategy.params["r_multiple"] == 2.5      # smc_trend's value
+    out = cfg.merge({"strategy.name": "ema_pullback", "strategy.params.fast": 9})
+    assert out.strategy.params_for == "ema_pullback"
+    assert out.strategy.params == {"fast": 9}
+    strat = build_strategy(out)
+    assert strat.params["fast"] == 9, "the supplied override must reach the strategy"
+    assert strat.params["slow"] == 50, "unset params keep the new strategy's defaults"
+    assert strat.params["r_multiple"] == 2.0, "the old strategy's params must not follow"
+
+
+def test_params_added_after_a_name_change_belong_to_the_new_name():
+    from tvlab.pipeline import build_strategy
+
+    cfg = load_config(market="crypto", style="swing")
+    out = cfg.merge({"strategy.name": "ema_pullback"}).merge({"strategy.params.fast": 9})
+    assert out.strategy.params_for == "ema_pullback"
+    assert out.strategy.params == {"fast": 9}, "stale params are not merged into"
+    assert build_strategy(out).params["fast"] == 9
+
+
+def test_params_for_the_same_strategy_still_merge_with_its_existing_ones():
+    cfg = load_config(market="crypto", style="swing")
+    out = cfg.merge({"strategy.params.r_multiple": 3.0})
+    assert out.strategy.params_for == "smc_trend"
+    assert out.strategy.params["r_multiple"] == 3.0
+    assert out.strategy.params["swing_length"] == 12, "sibling params must survive"
+
+
+def test_a_bare_name_change_still_runs_the_new_strategy_defaults():
+    from tvlab.pipeline import build_strategy
+
+    cfg = load_config(market="crypto", style="swing")
+    out = cfg.merge({"strategy.name": "buy_and_hold"})
+    assert out.strategy.params_for == "smc_trend"
+    strat = build_strategy(out)
+    assert "swing_length" not in strat.params
+    assert strat.params["max_bars_in_trade"] is None, "the 90-bar swing exit must not follow"
+
+
+def test_an_explicit_params_for_override_is_not_second_guessed():
+    from tvlab.pipeline import build_strategy
+
+    cfg = load_config(market="crypto", style="swing")
+    out = cfg.merge({"strategy.name": "ema_pullback", "strategy.params.fast": 9,
+                     "strategy.params_for": "smc_trend"})
+    assert out.strategy.params_for == "smc_trend"
+    assert build_strategy(out).params["fast"] == 21, (
+        "an explicit params_for says these params belong to another strategy")
+
+
 def test_fingerprint_changes_with_any_meaningful_edit():
     a = load_config(market="crypto", style="swing")
     b = load_config(market="crypto", style="swing")

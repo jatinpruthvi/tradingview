@@ -8,6 +8,7 @@ this. Run ``tvlab data --data-source nse`` on a machine with network access to
 find out, and fix the fixtures if NSE has moved.
 """
 import json
+import urllib.parse
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -150,6 +151,83 @@ def test_unsupported_timeframe_resamples_from_a_supported_one():
     src = YahooChartSource(http=Http(fetcher=fetcher, delay=0))
     src.fetch_ohlcv("TCS", "4h")
     assert "interval=1d" in calls[0]
+
+
+def _query(url: str) -> dict:
+    return urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+
+
+def test_a_long_intraday_request_is_not_sent_as_an_over_wide_range(caplog):
+    """Regression: the default 5m fetch asked for ``range=1y&interval=5m``.
+
+    Yahoo validates ``range`` against the interval *before* truncating, so that
+    URL is HTTP 422 - which made ``tvlab data --data-source nse --timeframe 5m``
+    fail outright, and an 80-day start fail as ``range=3mo``. No named range
+    covers a window wider than the interval's own cap, so the request has to use
+    explicit ``period1``/``period2``, clamped to the ~60 days Yahoo will serve.
+    """
+    fetcher, calls = _recording({"finance/chart": json.dumps(_yahoo_payload(n=40))})
+    src = YahooChartSource(http=Http(fetcher=fetcher, delay=0))
+    df = src.fetch_ohlcv("TCS", "5m")
+
+    assert "range=" not in calls[0], f"5m cannot use a named range here: {calls[0]}"
+    q = _query(calls[0])
+    assert q["period1"] and q["period2"]
+    assert 59 <= (int(q["period2"][0]) - int(q["period1"][0])) / 86400 <= 61
+    assert len(df) == 40, "the clamp is a window, not a reason to lose the bars in it"
+    assert "clamped to 60 days" in caplog.text
+
+
+def test_an_explicit_intraday_start_is_clamped_rather_than_422d():
+    """The reported failure: 5m with an 80-day start became ``range=3mo``."""
+    fetcher, calls = _recording({"finance/chart": json.dumps(_yahoo_payload(n=40))})
+    src = YahooChartSource(http=Http(fetcher=fetcher, delay=0))
+    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=80)).strftime("%Y-%m-%d")
+    df = src.fetch_ohlcv("TCS", "5m", start=start)
+
+    assert "range=" not in calls[0], f"3mo of 5m is a 422, not a series: {calls[0]}"
+    q = _query(calls[0])
+    assert 59 <= (int(q["period2"][0]) - int(q["period1"][0])) / 86400 <= 61
+    assert len(df) == 40
+
+
+def test_a_one_minute_request_is_clamped_to_its_eight_day_cap():
+    """1m is the tightest cap and the one with no named range narrow enough.
+
+    Measured live on 2026-11-25: an explicit 8-day period window is accepted and
+    returns 1,875 one-minute bars for TCS.NS (five sessions, Yahoo silently drops
+    the first partial day). The window must be exactly the cap - not the
+    requested span, which used to be 422 territory, and not wider.
+    """
+    fetcher, calls = _recording({"finance/chart": json.dumps(_yahoo_payload(n=40))})
+    src = YahooChartSource(http=Http(fetcher=fetcher, delay=0))
+    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=20)).strftime("%Y-%m-%d")
+    df = src.fetch_ohlcv("TCS", "1m", start=start)
+
+    assert "range=" not in calls[0], f"no named range fits 1m: {calls[0]}"
+    q = _query(calls[0])
+    span = (int(q["period2"][0]) - int(q["period1"][0])) / 86400
+    assert span == 8, f"1m must ask for exactly its 8-day cap, got {span}d"
+    assert len(df) == 40
+
+
+def test_a_short_intraday_request_still_uses_a_named_range():
+    """Clamping must not turn every request into a period query: a window that
+    fits inside the cap is cheaper and clearer as ``range=1mo``."""
+    fetcher, calls = _recording({"finance/chart": json.dumps(_yahoo_payload(n=40))})
+    src = YahooChartSource(http=Http(fetcher=fetcher, delay=0))
+    src.fetch_ohlcv("TCS", "5m", limit=600)
+    assert "range=1mo" in calls[0]
+    assert "period1=" not in calls[0]
+
+
+def test_a_long_daily_request_keeps_a_named_range():
+    """Daily has no cap, so years of history must stay a single ``range`` call."""
+    fetcher, calls = _recording({"finance/chart": json.dumps(_yahoo_payload(n=40))})
+    src = YahooChartSource(http=Http(fetcher=fetcher, delay=0))
+    df = src.fetch_ohlcv("TCS", "1d", limit=2000)
+    assert "range=10y" in calls[0]
+    assert len(df) == 40
 
 
 def test_list_symbols_is_refused_with_guidance():

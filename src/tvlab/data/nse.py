@@ -149,7 +149,7 @@ class Http:
 
 
 # ------------------------------------------------------- Yahoo chart endpoint
-YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval={iv}&range={rg}"
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval={iv}&{query}"
 
 #: Yahoo interval per tvlab timeframe. Anything not listed is resampled up from
 #: the closest supported interval.
@@ -158,13 +158,15 @@ YAHOO_INTERVALS = {
     "1h": "60m", "4h": "1d", "1d": "1d", "1w": "1wk", "1mo": "1mo",
 }
 
-#: Yahoo's own history limits, per interval. 1m is ~8 days per request, the rest
-#: of intraday is 60 days, 60m reaches 730 days and daily reaches everything.
-#: Asking for more returns a truncated series *without an error*, so the cap is
-#: checked here and warned about instead of silently shortening a backtest.
+#: Yahoo's own history limits, per interval. 1m is 8 days per request (measured
+#: 2026-11-25: an 8-day period window returns 1,875 bars, 30 and 60 both HTTP
+#: 422), the rest of intraday is 60 days, 60m reaches 730 days and daily reaches
+#: everything. Going over is a hard 422, not a truncation - both for a named
+#: ``range`` (``range=3mo&interval=5m``) and for an explicit period window - so
+#: the window is clamped here and warned about instead of failing the fetch.
 YAHOO_MAX_DAYS = {"1m": 8, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
 
-#: Longest ``range`` Yahoo will serve for each interval.
+#: ``range`` values Yahoo accepts, widest last.
 YAHOO_RANGE_FOR_DAYS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max")
 _RANGE_DAYS = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365,
                "2y": 730, "5y": 1826, "10y": 3652, "max": 10**6}
@@ -209,8 +211,9 @@ def yahoo_symbol(symbol: str, market: str = "indian_equities") -> str:
     return s
 
 
-def _range_for(limit: Optional[int], timeframe: str, start: Optional[str], end: Optional[str]) -> str:
-    """Smallest Yahoo ``range`` that can contain the request."""
+def _requested_days(limit: Optional[int], timeframe: str,
+                    start: Optional[str], end: Optional[str]) -> int:
+    """Calendar days the request spans, before Yahoo's per-interval cap."""
     if start:
         s = pd.Timestamp(start)
         e = pd.Timestamp(end) if end else pd.Timestamp.utcnow()
@@ -218,15 +221,44 @@ def _range_for(limit: Optional[int], timeframe: str, start: Optional[str], end: 
             s = s.tz_localize("UTC")
         if e.tz is None:
             e = e.tz_localize("UTC")
-        days = max(1, (e - s).days + 1)
-    elif limit:
-        days = max(1, int(limit * timeframe_seconds(timeframe) / 86400) + 5)
-    else:
-        days = 365
+        return max(1, (e - s).days + 1)
+    if limit:
+        return max(1, int(limit * timeframe_seconds(timeframe) / 86400) + 5)
+    return 365
+
+
+def _range_for(days: int, interval: Optional[str] = None) -> Optional[str]:
+    """Smallest named Yahoo ``range`` that covers ``days`` at ``interval``.
+
+    ``None`` means no named range can express the window, and the caller must
+    send ``period1``/``period2`` instead. Yahoo validates ``range`` against the
+    interval *before* it truncates: ``range=3mo&interval=5m`` is an HTTP 422,
+    not a 60-day series. Every range wide enough for a long intraday request is
+    wider than that interval's history cap, which is why the two have to be
+    reconciled here rather than in the URL.
+    """
+    cap = YAHOO_MAX_DAYS.get(interval) if interval else None
     for r in YAHOO_RANGE_FOR_DAYS:
-        if _RANGE_DAYS[r] >= days:
+        span = _RANGE_DAYS[r]
+        if cap is not None and span > cap:
+            continue
+        if span >= days:
             return r
-    return "max"
+    return None
+
+
+def _period_query(days: int, end: Optional[str]) -> str:
+    """Explicit ``period1``/``period2`` for the last ``days`` ending at ``end``.
+
+    Unix seconds, which Yahoo serves up to the interval cap without validating
+    them against the named ranges.
+    """
+    e = pd.Timestamp(end) if end else pd.Timestamp.utcnow()
+    if e.tz is None:
+        e = e.tz_localize("UTC")
+    e = e.tz_convert("UTC")
+    start = e - pd.Timedelta(days=max(1, int(days)))
+    return f"period1={int(start.timestamp())}&period2={int(e.timestamp())}"
 
 
 class YahooChartSource:
@@ -273,10 +305,16 @@ class YahooChartSource:
             iv = "1d" if timeframe_seconds(timeframe) >= 86400 else "60m"
             native_tf = "1d" if iv == "1d" else "1h"
 
-        self._warn_if_capped(symbol, iv, start, end, limit)
+        days = _requested_days(limit, timeframe, start, end)
+        self._warn_if_capped(symbol, iv, days)
+        rg = _range_for(days, iv)
+        # No named range fits: ask for explicit periods instead, clamped to what
+        # this interval can actually serve. A period window is not exempt from
+        # the cap either - 81 days of 5m is a 422 just like range=3mo was.
+        query = f"range={rg}" if rg else _period_query(min(days, YAHOO_MAX_DAYS[iv]), end)
 
         y = urllib.parse.quote(yahoo_symbol(symbol, self.market), safe="^=")
-        url = YAHOO_CHART.format(sym=y, iv=iv, rg=_range_for(limit, timeframe, start, end))
+        url = YAHOO_CHART.format(sym=y, iv=iv, query=query)
         payload = self.http.get_json(url)
 
         df = self._parse(payload, symbol, url)
@@ -323,26 +361,15 @@ class YahooChartSource:
 
         return df[~df.index.duplicated(keep="last")].sort_index()
 
-    def _warn_if_capped(self, symbol, iv, start, end, limit) -> None:
+    def _warn_if_capped(self, symbol, iv, days) -> None:
         cap = YAHOO_MAX_DAYS.get(iv)
-        if not cap:
+        if not cap or days <= cap:
             return
-        if start:
-            s = pd.Timestamp(start)
-            e = pd.Timestamp(end) if end else pd.Timestamp.utcnow()
-            want = (e.tz_localize(None) if e.tz else e.tz_localize(None)) - (s.tz_localize(None) if s.tz else s)
-            days = want.days
-        elif limit:
-            days = int(limit * timeframe_seconds({"60m": "1h", "1m": "1m", "5m": "5m",
-                                                  "15m": "15m", "30m": "30m", "2m": "2m"}.get(iv, "1d")) / 86400)
-        else:
-            return
-        if days > cap:
-            log.warning(
-                "%s: Yahoo serves only ~%d days of %s history; asked for %d. The series will be "
-                "truncated with no error. This is why intraday Indian backtests are short - use "
-                "daily bars for anything needing years of history.", symbol, cap, iv, days,
-            )
+        log.warning(
+            "%s: Yahoo serves only ~%d days of %s history; asked for %d, so the window is "
+            "clamped to %d days. This is why intraday Indian backtests are short - use "
+            "daily bars for anything needing years of history.", symbol, cap, iv, days, cap,
+        )
 
 
 def _apply_adjustment(df: pd.DataFrame, adj: pd.Series) -> pd.DataFrame:
