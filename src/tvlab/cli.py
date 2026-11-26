@@ -1436,6 +1436,96 @@ def compare(market, style, config, set_pairs, symbols, data_source, strategies) 
                   "On synthetic data a trend-follower wins by construction.")
 
 
+# -------------------------------------------------------------------- variants
+@cli.command()
+@click.option("--market", default=None)
+@click.option("--style", default=None)
+@click.option("--config", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
+@click.option("--symbols", default=None)
+@click.option("--data-source", default=None,
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart", "nse_delivery"]))
+@click.option("--preset", type=click.Choice(["orb"]), default="orb", show_default=True,
+              help="built-in variant suite to evaluate")
+@click.option("--walk-forward", is_flag=True, help="also score primary symbol OOS walk-forward")
+@click.option("--out", type=click.Path(path_type=Path), default=None,
+              help="optional CSV path to save the variant comparison table")
+def variants(market, style, config, set_pairs, symbols, data_source, preset,
+             walk_forward, out) -> None:
+    """Run controlled strategy variants on identical data with DSR trial correction."""
+    from .variants import orb_improvement_variants, run_variants
+
+    cfg = _cfg(market, style, config, set_pairs, data_source)
+    syms = _symbols_arg(cfg, symbols)
+    sess_tz = "Asia/Kolkata" if cfg.universe.market == "indian_equities" else None
+    specs = orb_improvement_variants(session_tz=sess_tz) if preset == "orb" else []
+
+    with console.status(f"running {len(specs)} {preset} variants across {len(syms)} symbol(s)..."):
+        df = run_variants(cfg, specs, symbols=syms, source=data_source,
+                          use_walk_forward=walk_forward)
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out, index=False)
+
+    t = Table(title=f"Variant study ({preset}) - {cfg.universe.market} {cfg.timeframe.execution} "
+                    f"[{len(specs)} trials]")
+    display_cols = [c for c in df.columns if c != "description"]
+    for col in display_cols:
+        t.add_column(str(col), justify="left" if col in ("variant", "wf_windows", "error") else "right")
+    for _, row in df.iterrows():
+        t.add_row(*[_cell(row[c]) for c in display_cols])
+    console.print(t)
+    console.print("\n[dim]All DSR values are penalized for the full variant trial count "
+                  f"(N={len(specs)}). Keep only variants that improve OOS / DSR in isolation.[/dim]")
+
+
+# --------------------------------------------------------------------- options
+@cli.command("options")
+@click.option("--market", default="indian_equities", show_default=True)
+@click.option("--style", default="intraday", show_default=True)
+@click.option("--config", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--set", "set_pairs", multiple=True, metavar="KEY=VALUE")
+@click.option("--symbols", default=None)
+@click.option("--strategy", "strategy_name", default="orb", show_default=True)
+@click.option("--data-source", default=None,
+              type=click.Choice(["synthetic", "csv", "ccxt", "yfinance", "tvscreener",
+                                  "nse", "yahoo_chart", "nse_delivery"]))
+@click.option("--out", type=click.Path(path_type=Path), default=None,
+              help="optional CSV path to save the option sweep table")
+def options_cmd(market, style, config, set_pairs, symbols, strategy_name, data_source, out) -> None:
+    """Simulate Black-Scholes long Calls/Puts over underlying bar signals."""
+    from .backtest.options_sim import run_option_study
+
+    cfg = _cfg(market, style, config, set_pairs, data_source)
+    if strategy_name:
+        overrides: Dict[str, Any] = {"strategy.name": strategy_name}
+        if strategy_name == "orb" and cfg.universe.market == "indian_equities":
+            overrides.setdefault("strategy.params.session_tz", "Asia/Kolkata")
+            overrides.setdefault("strategy.params.min_range_pct", 0.005)
+            overrides.setdefault("strategy.params.max_entry_tod", "11:30")
+        cfg = cfg.merge(overrides)
+    syms = _symbols_arg(cfg, symbols)
+
+    with console.status(f"simulating option-buying sweep on {len(syms)} symbol(s)..."):
+        df = run_option_study(cfg, symbols=syms, source=data_source)
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out, index=False)
+
+    t = Table(title=f"Option buying sweep ({cfg.strategy.name}) - {cfg.universe.market} "
+                    f"{cfg.timeframe.execution} [{len(syms)} symbols]")
+    for col in df.columns:
+        t.add_column(str(col), justify="left" if col in ("config", "hold_bars") else "right")
+    for _, row in df.iterrows():
+        t.add_row(*[_cell(row[c]) for c in df.columns])
+    console.print(t)
+    console.print("\n[dim]Modelled via causal trailing 20d RV x iv_markup, Black-Scholes Gamma/Theta, "
+                  "and 100 bps round-trip option cost+spread.[/dim]")
+
+
 # -------------------------------------------------------------------- validate
 @cli.command()
 @click.option("--market", default=None)
@@ -1818,6 +1908,7 @@ def nse_holidays(market, style, config, index, days) -> None:
 #: Where the forward-collected chain panel lives, relative to the repo root, so
 #: a cron job, an interactive shell and the dashboard all mean the same file.
 DEFAULT_CHAIN_PANEL = "data/option_chain/chain_features.parquet"
+DEFAULT_LTP_PANEL = "data/option_chain/ltp_features.parquet"
 
 
 def _chain_client():
@@ -2120,6 +2211,58 @@ def chain_study_cmd(market, style, config, panel_path, horizon, min_days,
     if res.insufficient:
         console.print(f"[dim]the panel needs {res.min_days - res.evaluated_days} more usable "
                       f"day(s) before this command will judge anything[/dim]")
+
+
+@chain.command("ltp")
+@click.option("--symbols", default="NIFTY", show_default=True,
+              help="comma-separated symbols (index or F&O names, e.g. NIFTY,BANKNIFTY)")
+@click.option("--min-dte", type=int, default=0, show_default=True,
+              help="minimum DTE for expiry selection (0 = current weekly/monthly)")
+@click.option("--out", type=click.Path(path_type=Path), default=None,
+              help=f"parquet panel (default: {DEFAULT_LTP_PANEL})")
+@click.option("--dry-run", is_flag=True, help="print live LTP Calculator read-out, write nothing")
+@_catch_data_error
+def chain_ltp(symbols, min_dte, out, dry_run) -> None:
+    """Record-only LTP Calculator metrics (S/R, WTT/WTB, COA, EOR/EOS).
+
+    Observational only until 40+ sessions of panel data exist to test against
+    actual returns; never modifies orb or suggest rankings on its own.
+    """
+    from .data.nse import IST
+    from .data.option_chain import append_ltp_rows, snapshot_ltp
+
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    path = Path(out) if out else REPO_ROOT / DEFAULT_LTP_PANEL
+    today = datetime.now(IST).date()
+
+    http = _chain_client()
+    rows = [snapshot_ltp(http, sym, today=today, min_dte=min_dte) for sym in syms]
+
+    t = Table(title=f"LTP Calculator snapshot (record-only) - {today.isoformat()}")
+    for col, justify in (("symbol", "left"), ("spot", "right"), ("sup", "right"),
+                         ("res", "right"), ("sup_state", "center"),
+                         ("res_state", "center"), ("coa", "center"),
+                         ("eos", "right"), ("eor", "right"), ("note", "left")):
+        t.add_column(col, justify=justify)
+    for r in rows:
+        t.add_row(
+            str(r["symbol"]), _cell(_plain(r["spot"])),
+            _cell(_plain(r["sup_strike"])), _cell(_plain(r["res_strike"])),
+            str(r["sup_state"] or "-"), str(r["res_state"] or "-"),
+            str(r["coa_regime"] or "-"),
+            _cell(_plain(r["eos"])), _cell(_plain(r["eor"])),
+            r["error"] or "",
+        )
+    console.print(t)
+
+    if dry_run:
+        console.print("[dim]--dry-run: nothing written[/dim]")
+        return
+
+    panel = append_ltp_rows(path, rows)
+    ok = sum(1 for r in rows if r["ok"])
+    console.print(f"[bold]{ok}/{len(rows)} usable[/bold] - {path} now holds "
+                  f"{len(panel)} row(s) across {panel['as_of'].nunique()} day(s)")
 
 
 def _pct(v: Optional[float]) -> str:

@@ -179,6 +179,70 @@ def asset_returns_from_ohlcv(ohlcv: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             .replace([np.inf, -np.inf], np.nan))
 
 
+def causal_rs_mask(
+    ohlcv: Dict[str, pd.DataFrame],
+    lookback_sessions: int = 20,
+    top_pct: float = 0.4,
+) -> Dict[str, pd.DataFrame]:
+    """Causal cross-sectional relative-strength mask per symbol.
+
+    For each session date ``D``, symbols are ranked strictly on their trailing
+    ``lookback_sessions`` return ending at the close of session ``D - 1``
+    (shifted by one full session so nothing from session ``D`` is ever read).
+
+    Returns ``symbol -> DataFrame({"allow_long": bool, "allow_short": bool})``
+    aligned to each symbol's index:
+    * ``allow_long`` is True for the top ``top_pct`` leaders.
+    * ``allow_short`` is True for the bottom ``top_pct`` laggards.
+    * Warmup sessions before ``lookback_sessions`` completed days stay True
+      (fail-open on insufficient history rather than killing short samples).
+    """
+    if not ohlcv or not (0.0 < float(top_pct) < 1.0):
+        return {}
+
+    daily_closes: Dict[str, pd.Series] = {}
+    for sym, df in ohlcv.items():
+        if df is None or df.empty or "close" not in df.columns:
+            continue
+        idx = df.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            continue
+        day = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+        # last close per session date
+        s_close = df["close"].groupby(day).last()
+        daily_closes[sym] = s_close
+
+    if len(daily_closes) < 2:
+        return {}
+
+    panel = pd.DataFrame(daily_closes).sort_index().ffill()
+    lb = max(int(lookback_sessions), 1)
+    # Strictly shift by 1 completed session so day D never sees day D's close.
+    trailing_ret = panel.pct_change(lb).shift(1)
+    long_rank = trailing_ret.rank(axis=1, ascending=False, pct=True, method="average")
+    short_rank = trailing_ret.rank(axis=1, ascending=True, pct=True, method="average")
+    n_valid = trailing_ret.notna().sum(axis=1).replace(0, np.nan)
+    eff_pct = np.maximum(float(top_pct), (1.0 / n_valid).to_numpy())
+
+    out: Dict[str, pd.DataFrame] = {}
+    for sym, df in ohlcv.items():
+        if sym not in long_rank.columns or df is None or df.empty:
+            continue
+        idx = df.index
+        day = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+        lr = long_rank[sym].reindex(day).to_numpy()
+        sr = short_rank[sym].reindex(day).to_numpy()
+        cut = pd.Series(eff_pct, index=panel.index).reindex(day).to_numpy()
+        no_hist = np.isnan(lr)
+        allow_long = no_hist | (lr <= cut)
+        allow_short = no_hist | (sr <= cut)
+        out[sym] = pd.DataFrame(
+            {"allow_long": allow_long, "allow_short": allow_short},
+            index=idx,
+        )
+    return out
+
+
 def _volatility(returns: pd.DataFrame, periods_per_year: float) -> pd.Series:
     vol = returns.std() * np.sqrt(periods_per_year)
     return vol.replace(0.0, np.nan)

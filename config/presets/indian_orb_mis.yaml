@@ -1,0 +1,61 @@
+# Preset: NSE Intraday MIS Opening Range Breakout (enhanced)
+#
+# Use with:
+#   tvlab study --market indian_equities --style intraday --config config/presets/indian_orb_mis.yaml --data-source csv
+#   tvlab variants --market indian_equities --style intraday --config config/presets/indian_orb_mis.yaml --data-source csv
+#
+# Models NSE intraday MIS shorting, realistic MIS statutory+discount costs on
+# liquid large-cap names, unclipped narrow-stop sizing, and causal ORB gates.
+
+universe:
+  nse_index: NIFTY 50
+  max_symbols: 30
+  rs_top_pct: 0.4
+  rs_lookback_sessions: 20
+
+risk:
+  allow_short: true
+  max_position_pct: 0.40
+  max_leverage: 2.0
+  max_open_positions: 3
+  max_correlated_positions: 2
+  daily_loss_limit_pct: 0.015
+
+costs:
+  fee_bps: 2.0
+  slippage_bps: 2.5
+
+timeframe:
+  execution: 5m
+  bias: 1d
+
+backtest:
+  use_limit_entries: true
+  max_bars_in_trade: null
+
+strategy:
+  name: orb
+  params_for: orb
+  params:
+    range_bars: 3
+    atr_period: 14
+    stop_buffer_atr: 0.0
+    exit_tod: "15:25"
+    session_tz: "Asia/Kolkata"
+    allow_short: true
+    max_bars_in_trade: null
+    confirm_close: true
+    max_entry_tod: "11:30"
+    min_range_pct: 0.004
+    max_range_atr: 1.5
+    max_gap_atr: 1.5
+    max_chase_ratio: 0.75
+    stop_mode: midpoint_on_wide
+    wide_range_pct: 0.015
+    r_multiple: 2.5
+    limit_entry: true
+    limit_offset_atr: 0.0
+    use_bias: true
+    bias_ema: 50
+    bias_mode: ema_slope
+    market_filter: false

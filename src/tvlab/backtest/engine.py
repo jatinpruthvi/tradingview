@@ -157,6 +157,9 @@ class Backtester:
         #: express "this is the last bar of the session".
         exit_sig = (np.ascontiguousarray(signals["exit"].to_numpy(dtype="float64"))
                     if "exit" in signals else np.zeros(n))
+        entry_px_in = (np.ascontiguousarray(signals["entry_price"].to_numpy(dtype="float64"))
+                       if "entry_price" in signals else None)
+        use_limit = bool(getattr(cfg.backtest, "use_limit_entries", False))
         times = df.index
         governor = RiskGovernor(cfg.risk, cfg.backtest.initial_capital)
         cash = float(cfg.backtest.initial_capital)
@@ -171,6 +174,7 @@ class Backtester:
         entry_tag = ""
         entry_equity = np.nan
         entry_throttle = 1.0
+        clipped_count = 0
         #: the stop the position was SIZED against. Trailing may move the live
         #: stop, but R must stay measured against the risk actually taken, or a
         #: trailed stop would shrink the denominator and inflate every R.
@@ -274,16 +278,35 @@ class Backtester:
                     if not can:
                         _bump(why)
                     else:
-                        raw_px = o[i] if next_open else c[i]
-                        entry = self._apply_slippage(raw_px, int(np.sign(want)))
+                        sig_idx = i - 1 if next_open else i
+                        want_side = int(np.sign(want))
+                        limit_px = (float(entry_px_in[sig_idx])
+                                    if (use_limit and entry_px_in is not None) else np.nan)
+                        filled_via_limit = False
+                        if np.isfinite(limit_px) and next_open:
+                            if want_side > 0:
+                                if l[i] <= limit_px:
+                                    entry = float(min(o[i], limit_px))
+                                    filled_via_limit = True
+                                else:
+                                    _bump("limit_not_filled")
+                                    continue
+                            else:
+                                if h[i] >= limit_px:
+                                    entry = float(max(o[i], limit_px))
+                                    filled_via_limit = True
+                                else:
+                                    _bump("limit_not_filled")
+                                    continue
+                        if not filled_via_limit:
+                            raw_px = o[i] if next_open else c[i]
+                            entry = self._apply_slippage(raw_px, want_side)
                         a = atr_arr[i - 1] if (atr_arr is not None and i > 0) else None
-                        s_px = self._resolve_level(stop_in[i - 1] if next_open else stop_in[i],
-                                                   entry, int(np.sign(want)), a, is_stop=True)
-                        t_px = self._resolve_level(tgt_in[i - 1] if next_open else tgt_in[i],
-                                                   entry, int(np.sign(want)), a, is_stop=False)
+                        s_px = self._resolve_level(stop_in[sig_idx], entry, want_side, a, is_stop=True)
+                        t_px = self._resolve_level(tgt_in[sig_idx], entry, want_side, a, is_stop=False)
                         res = self._sizer_for(cfg).size(
                             equity=equity_arr[i], price=entry, stop=s_px,
-                            side=int(np.sign(want)), peak_equity=governor.peak_equity,
+                            side=want_side, peak_equity=governor.peak_equity,
                             atr=a, min_units=min_units,
                         )
                         if not res.accepted:
@@ -294,11 +317,13 @@ class Backtester:
                                     cfg.risk.max_leverage + 1e-9:
                                 _bump("insufficient_equity")
                             else:
+                                if res.clipped:
+                                    clipped_count += 1
                                 fee = max(cost * self.fee, self.min_comm)
                                 cash -= res.units * entry + fee
                                 entry_fee = fee
                                 units = res.units
-                                side = int(np.sign(want))
+                                side = want_side
                                 entry_px, stop_px, tgt_px = entry, s_px, t_px
                                 entry_stop = s_px
                                 # the entry bar's own extreme is a valid trailing
@@ -307,7 +332,7 @@ class Backtester:
                                             else min(entry, l[i]))
                                            if next_open else entry)
                                 entry_i = i
-                                entry_tag = str(tag[i - 1] if next_open else tag[i])
+                                entry_tag = str(tag[sig_idx])
                                 entry_equity = equity_arr[i]
                                 entry_throttle = res.throttle
                                 pos_arr[i] = units
@@ -346,6 +371,11 @@ class Backtester:
             warnings.append(
                 "no trades were taken. Check the signal logic, the trend filter, "
                 f"or the risk caps. Skipped entries: {skipped}"
+            )
+        elif clipped_count > 0 and len(trades_df) > 0 and (clipped_count / len(trades_df)) >= 0.30:
+            warnings.append(
+                f"{clipped_count}/{len(trades_df)} trades had risk clipped by "
+                f"max_position_pct={cfg.risk.max_position_pct:.0%} (max_leverage={cfg.risk.max_leverage}x)"
             )
 
         return BacktestResult(

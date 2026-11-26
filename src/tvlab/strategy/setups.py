@@ -393,10 +393,42 @@ class OpeningRangeBreakout(Strategy):
         "range_bars": 3,
         "atr_period": 14,
         "stop_buffer_atr": 0.0,
-        #: last bar of the session, as "HH:MM" in the frame's own timezone
+        #: last bar of the session, as "HH:MM" in ``session_tz`` (or the frame's tz)
         "exit_tod": "15:25",
+        #: optional timezone name (e.g. "Asia/Kolkata") to convert tz-aware indices
+        #: before checking ``exit_tod`` / ``max_entry_tod`` and session boundaries
+        "session_tz": None,
         "allow_short": True,
         "max_bars_in_trade": None,   # the session exit is the exit
+        #: require bar close beyond the opening range instead of an intrabar wick
+        "confirm_close": False,
+        #: optional "HH:MM" cutoff after which no new breakouts are entered
+        "max_entry_tod": None,
+        #: skip sessions whose opening range is tighter than this price fraction
+        "min_range_pct": None,
+        #: skip sessions whose opening range exceeds this multiple of prior-session range ATR
+        "max_range_atr": None,
+        #: skip sessions whose overnight gap exceeds this multiple of prior-session range ATR
+        "max_gap_atr": None,
+        #: skip breakouts whose signal bar already extended beyond k * opening_range
+        "max_chase_ratio": None,
+        #: "opposite" | "midpoint" | "midpoint_on_wide"
+        "stop_mode": "opposite",
+        "wide_range_pct": 0.015,
+        #: optional finite R-multiple profit target (None = hold until exit_tod)
+        "r_multiple": None,
+        #: emit a resting limit entry level at the opening range boundary
+        "limit_entry": False,
+        "limit_offset_atr": 0.0,
+        #: optional higher-timeframe trend alignment via trend_filter(df, bias)
+        "use_bias": False,
+        "bias_ema": 50,
+        "bias_adx_period": 14,
+        "bias_adx_min": 18.0,
+        "bias_mode": "ema_slope",
+        "bias_slope_lookback": 5,
+        #: optional index/market regime alignment (reads regime frame or _regime_dir)
+        "market_filter": False,
     }
 
     grid: Dict[str, tuple] = {
@@ -404,7 +436,66 @@ class OpeningRangeBreakout(Strategy):
         "stop_buffer_atr": (0.0, 0.5),
     }
 
-    def signals(self, df: pd.DataFrame, bias: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    @staticmethod
+    def _parse_tod(hhmm: Optional[str]) -> Optional[int]:
+        if not hhmm:
+            return None
+        hh, mm = str(hhmm).split(":")
+        return int(hh) * 60 + int(mm)
+
+    @staticmethod
+    def _causal_session_stats(
+        starts: np.ndarray, ends: np.ndarray,
+        hi: np.ndarray, lo: np.ndarray, cl: np.ndarray, lookback: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Prior-session close and rolling session-range ATR using strictly completed sessions."""
+        m = len(starts)
+        prev_close = np.full(m, np.nan)
+        daily_atr = np.full(m, np.nan)
+        ranges = np.empty(m)
+        for k in range(m):
+            s, e = int(starts[k]), int(ends[k])
+            ranges[k] = float(hi[s:e].max() - lo[s:e].min())
+            if k >= 1:
+                prev_close[k] = float(cl[int(ends[k - 1]) - 1])
+                w_start = max(0, k - max(int(lookback), 1))
+                daily_atr[k] = float(ranges[w_start:k].mean())
+        return prev_close, daily_atr
+
+    @staticmethod
+    def _causal_regime_dir(
+        df: pd.DataFrame, regime: Optional[pd.DataFrame],
+        starts: np.ndarray, ends: np.ndarray, rb: int,
+    ) -> Optional[np.ndarray]:
+        """Causal index/market direction aligned to df (+1 bullish, -1 bearish, 0 neutral)."""
+        if "_regime_dir" in df.columns:
+            return df["_regime_dir"].fillna(0).to_numpy(dtype="int8")
+        if regime is None or len(regime) == 0 or "close" not in regime.columns:
+            return None
+        aligned = regime.reindex(df.index).ffill()
+        rc = aligned["close"].to_numpy(dtype="float64")
+        rh = aligned["high"].to_numpy(dtype="float64") if "high" in aligned else rc
+        rl = aligned["low"].to_numpy(dtype="float64") if "low" in aligned else rc
+        out = np.zeros(len(df), dtype="int8")
+        for s, e in zip(starts, ends):
+            if e - s < rb + 1:
+                continue
+            hi_win = rh[s:s + rb]
+            lo_win = rl[s:s + rb]
+            if not (np.isfinite(hi_win).any() and np.isfinite(lo_win).any()):
+                continue
+            irhi = float(np.nanmax(hi_win))
+            irlo = float(np.nanmin(lo_win))
+            for i in range(s + rb, e):
+                if np.isfinite(rc[i]):
+                    if rc[i] > irhi:
+                        out[i] = 1
+                    elif rc[i] < irlo:
+                        out[i] = -1
+        return out
+
+    def signals(self, df: pd.DataFrame, bias: Optional[pd.DataFrame] = None,
+                regime: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         p = self.params
         out = blank_signals(df)
         n = len(df)
@@ -412,8 +503,10 @@ class OpeningRangeBreakout(Strategy):
         if n == 0 or not isinstance(idx, pd.DatetimeIndex):
             return out
 
-        tod = (idx.hour * 60 + idx.minute).to_numpy()
-        day = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+        sess_tz = p.get("session_tz")
+        local_idx = idx.tz_convert(sess_tz) if (sess_tz and idx.tz is not None) else idx
+        tod = (local_idx.hour * 60 + local_idx.minute).to_numpy()
+        day = (local_idx.tz_localize(None) if local_idx.tz is not None else local_idx).normalize()
         spacing = pd.Series(idx).diff().median()
         intraday = bool(pd.notna(spacing) and spacing < pd.Timedelta(hours=20))
 
@@ -421,32 +514,82 @@ class OpeningRangeBreakout(Strategy):
         # "this is the last row of the date" would need the NEXT bar's date and
         # is therefore lookahead - the audit in validation/lookahead.py catches it.
         exit_flags = np.zeros(n)
-        exit_cut = None
-        if intraday:
-            hh, mm = str(p["exit_tod"]).split(":")
-            exit_cut = int(hh) * 60 + int(mm)
+        exit_cut = self._parse_tod(p["exit_tod"]) if intraday else None
+        if exit_cut is not None:
             exit_flags[tod >= exit_cut] = 1.0
         out["exit"] = exit_flags
+        max_entry_cut = self._parse_tod(p["max_entry_tod"]) if intraday else None
 
+        op = df["open"].to_numpy(dtype="float64")
         hi = df["high"].to_numpy(dtype="float64")
         lo = df["low"].to_numpy(dtype="float64")
+        cl = df["close"].to_numpy(dtype="float64")
         a = atr(df, int(p["atr_period"])).to_numpy(dtype="float64")
         rb = int(p["range_bars"])
         buf = float(p["stop_buffer_atr"])
 
-        sig = np.zeros(n)
-        stop = np.full(n, np.nan)
-        tags = [""] * n
+        trend_arr = (
+            trend_filter(
+                df, bias, int(p["bias_ema"]), int(p["bias_adx_period"]),
+                float(p["bias_adx_min"]), mode=str(p["bias_mode"]),
+                slope_lookback=int(p["bias_slope_lookback"]),
+            ).to_numpy()
+            if p["use_bias"] else None
+        )
 
         codes = pd.factorize(day)[0]
         cuts = np.flatnonzero(np.diff(codes)) + 1
         starts = np.r_[0, cuts]
         ends = np.r_[cuts, n]
-        for s, e in zip(starts, ends):
+
+        prev_close, daily_atr = self._causal_session_stats(
+            starts, ends, hi, lo, cl, int(p["atr_period"]),
+        )
+        reg_dir = (
+            self._causal_regime_dir(df, regime, starts, ends, rb)
+            if p["market_filter"] else None
+        )
+
+        sig = np.zeros(n)
+        stop = np.full(n, np.nan)
+        target = np.full(n, np.inf)
+        entry_px_arr = np.full(n, np.nan)
+        tags = [""] * n
+
+        confirm_close = bool(p["confirm_close"])
+        min_range_pct = p["min_range_pct"]
+        max_range_atr = p["max_range_atr"]
+        max_gap_atr = p["max_gap_atr"]
+        max_chase = p["max_chase_ratio"]
+        stop_mode = str(p["stop_mode"])
+        wide_pct = float(p["wide_range_pct"])
+        r_mult = p["r_multiple"]
+        limit_entry = bool(p["limit_entry"])
+        limit_off = float(p["limit_offset_atr"])
+
+        for sess_idx, (s, e) in enumerate(zip(starts, ends)):
             if e - s < rb + 1:
                 continue
             rhi = float(hi[s:s + rb].max())
             rlo = float(lo[s:s + rb].min())
+            rng = rhi - rlo
+            rmid = 0.5 * (rhi + rlo)
+
+            if min_range_pct is not None and rmid > 0 and (rng / rmid) < float(min_range_pct):
+                continue
+            d_atr = daily_atr[sess_idx]
+            if max_range_atr is not None and np.isfinite(d_atr) and d_atr > 0:
+                if (rng / d_atr) > float(max_range_atr):
+                    continue
+            p_close = prev_close[sess_idx]
+            if (max_gap_atr is not None and np.isfinite(p_close)
+                    and np.isfinite(d_atr) and d_atr > 0):
+                if abs(op[s] - p_close) / d_atr > float(max_gap_atr):
+                    continue
+
+            use_mid = (stop_mode == "midpoint") or (
+                stop_mode == "midpoint_on_wide" and rmid > 0 and (rng / rmid) >= wide_pct
+            )
             step = 0
             for i in range(s + rb, e):
                 if i > s:
@@ -458,29 +601,72 @@ class OpeningRangeBreakout(Strategy):
                 if exit_cut is not None and (exit_flags[i]
                                              or (step and tod[i] + 2 * step > exit_cut)):
                     break
-                up, dn = hi[i] > rhi, lo[i] < rlo
+                if max_entry_cut is not None and tod[i] > max_entry_cut:
+                    break
+
+                # An outside bar that pierces both sides is always ambiguous
+                if hi[i] > rhi and lo[i] < rlo:
+                    break
+                up = (cl[i] > rhi) if confirm_close else (hi[i] > rhi)
+                dn = (cl[i] < rlo) if confirm_close else (lo[i] < rlo)
                 if up and dn:
-                    break                      # ambiguous bar: skip the session
+                    break
+
+                a_val = a[i] if np.isfinite(a[i]) else 0.0
                 if up:
+                    if max_chase is not None and rng > 0 and (cl[i] - rhi) / rng > float(max_chase):
+                        break
+                    if trend_arr is not None and trend_arr[i] != 1:
+                        break
+                    if reg_dir is not None and reg_dir[i] != 1:
+                        break
+                    base_stop = rmid if use_mid else rlo
+                    stop_val = base_stop - buf * a_val
+                    lim_val = rhi + limit_off * a_val if limit_entry else np.nan
+                    ref_px = lim_val if np.isfinite(lim_val) else cl[i]
+                    risk_dist = ref_px - stop_val
+                    if risk_dist <= 0:
+                        break
                     sig[i] = 1.0
-                    stop[i] = rlo - buf * (a[i] if np.isfinite(a[i]) else 0.0)
+                    stop[i] = stop_val
+                    if limit_entry:
+                        entry_px_arr[i] = lim_val
+                    if r_mult is not None:
+                        target[i] = ref_px + float(r_mult) * risk_dist
                     tags[i] = "orb_long"
                     break
                 if dn:
                     if not p["allow_short"]:
                         break
+                    if max_chase is not None and rng > 0 and (rlo - cl[i]) / rng > float(max_chase):
+                        break
+                    if trend_arr is not None and trend_arr[i] != -1:
+                        break
+                    if reg_dir is not None and reg_dir[i] != -1:
+                        break
+                    base_stop = rmid if use_mid else rhi
+                    stop_val = base_stop + buf * a_val
+                    lim_val = rlo - limit_off * a_val if limit_entry else np.nan
+                    ref_px = lim_val if np.isfinite(lim_val) else cl[i]
+                    risk_dist = stop_val - ref_px
+                    if risk_dist <= 0:
+                        break
                     sig[i] = -1.0
-                    stop[i] = rhi + buf * (a[i] if np.isfinite(a[i]) else 0.0)
+                    stop[i] = stop_val
+                    if limit_entry:
+                        entry_px_arr[i] = lim_val
+                    if r_mult is not None:
+                        target[i] = ref_px - float(r_mult) * risk_dist
                     tags[i] = "orb_short"
                     break
 
         out["signal"] = sig
         out["stop"] = stop
-        # +inf is the engine's explicit "no target" sentinel. Leaving this NaN
-        # would let the engine substitute a 4-ATR target, which is NOT the rule
-        # that was measured: the measured exit is the session close.
-        out["target"] = np.inf
+        # +inf is the engine's explicit "no target" sentinel when r_multiple is None.
+        out["target"] = target
         out["tag"] = tags
+        if limit_entry:
+            out["entry_price"] = entry_px_arr
         return out
 
 

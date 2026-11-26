@@ -38,6 +38,8 @@ class SizingResult:
     risk_amount: float
     throttle: float
     reason: str = "ok"
+    clipped: bool = False
+    unclipped_notional: float = 0.0
 
     @property
     def accepted(self) -> bool:
@@ -144,10 +146,13 @@ class Sizer:
 
         # ---- caps: notional and leverage -------------------------------------
         max_notional = equity * self.risk.max_position_pct * self.risk.max_leverage * throttle
-        notional = units * price
+        unclipped_notional = units * price
+        notional = unclipped_notional
+        clipped = False
         if notional > max_notional and notional > 0:
             units = max_notional / price
             notional = units * price
+            clipped = True
 
         if units <= 0 or not np.isfinite(units):
             return SizingResult(0.0, 0.0, 0.0, throttle, "zero_size")
@@ -159,6 +164,8 @@ class Sizer:
             notional=float(abs(units) * price),
             risk_amount=float(abs(units) * dist),
             throttle=float(throttle),
+            clipped=clipped,
+            unclipped_notional=float(unclipped_notional),
         )
 
 

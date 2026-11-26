@@ -371,3 +371,68 @@ def test_a_failed_snapshot_is_reported_not_hidden(runner, monkeypatch, tmp_path)
     assert "0/2 with a usable chain" in res.output
     panel = pd.read_parquet(tmp_path / "p.parquet")
     assert set(panel["error"]) == {"no listed options"}
+
+
+# ------------------------------------------------------------ LTP Calculator
+
+
+def test_ltp_features_detects_wtt_wtb_coa_and_eos_eor():
+    from tvlab.data.option_chain import ltp_features
+
+    # Call max OI at 1050 (3000), next strike above at 1100 has 2400 (0.80 >= 0.75 -> WTT)
+    # Put max OI at 950 (2500), surrounding strikes tiny (< 0.75 -> STRONG)
+    rec = {"records": {
+        "underlyingValue": 1000.0,
+        "data": [
+            {"strikePrice": 900, "CE": {"openInterest": 100, "totalTradedVolume": 100, "lastPrice": 110.0},
+             "PE": {"openInterest": 500, "totalTradedVolume": 200, "lastPrice": 5.0}},
+            {"strikePrice": 950, "CE": {"openInterest": 150, "totalTradedVolume": 150, "lastPrice": 65.0},
+             "PE": {"openInterest": 2500, "totalTradedVolume": 3000, "lastPrice": 12.5}},
+            {"strikePrice": 1000, "CE": {"openInterest": 900, "totalTradedVolume": 800, "lastPrice": 28.0},
+             "PE": {"openInterest": 700, "totalTradedVolume": 900, "lastPrice": 24.0}},
+            {"strikePrice": 1050, "CE": {"openInterest": 3000, "totalTradedVolume": 2000, "lastPrice": 14.0},
+             "PE": {"openInterest": 300, "totalTradedVolume": 100, "lastPrice": 60.0}},
+            {"strikePrice": 1100, "CE": {"openInterest": 2400, "totalTradedVolume": 1600, "lastPrice": 4.0},
+             "PE": {"openInterest": 100, "totalTradedVolume": 50, "lastPrice": 105.0}},
+        ],
+    }}
+    f = ltp_features(rec["records"])
+    assert f is not None
+    assert f["res_strike"] == 1050.0
+    assert f["sup_strike"] == 950.0
+    assert f["res_wtt_ratio"] == pytest.approx(0.8)
+    assert f["res_state"] == "WTT"
+    assert f["sup_state"] == "STRONG"
+    assert f["coa_regime"] == "BULLISH"
+    assert f["eor"] == pytest.approx(1064.0)
+    assert f["eos"] == pytest.approx(937.5)
+
+
+def test_ltp_snapshot_and_cli_roundtrip_and_index_url(runner, monkeypatch, tmp_path):
+    from tvlab.data.option_chain import load_ltp_panel
+
+    seen_urls = []
+
+    def fetch(url: str, timeout: float) -> bytes:
+        seen_urls.append(url)
+        if "contract-info" in url:
+            return json.dumps({"expiryDates": ["01-Dec-2026"]}).encode()
+        rec = {"records": {
+            "expiryDates": ["01-Dec-2026"],
+            "underlyingValue": 1000.0,
+            "data": [
+                {"strikePrice": 950, "CE": _leg(150, volume=100), "PE": _leg(2500, volume=2000)},
+                {"strikePrice": 1000, "CE": _leg(900, volume=500), "PE": _leg(700, volume=500)},
+                {"strikePrice": 1050, "CE": _leg(3000, volume=2500), "PE": _leg(300, volume=100)},
+            ],
+        }}
+        return json.dumps(rec).encode()
+
+    monkeypatch.setattr(cli_mod, "_chain_client", lambda: ChainHttp(fetcher=fetch, delay=0))
+    out = tmp_path / "ltp.parquet"
+    res = runner.invoke(cli, ["chain", "ltp", "--symbols", "NIFTY", "--out", str(out)])
+    assert res.exit_code == 0, res.output
+    assert any("type=Indices" in u for u in seen_urls)
+    panel = load_ltp_panel(out)
+    assert len(panel) == 1
+    assert panel["coa_regime"].iloc[0] == "RANGE_BOUND"

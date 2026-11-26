@@ -96,6 +96,10 @@ class UniverseConfig:
     #: whatever NSE says the index contains today. Also accepts the special name
     #: "SECURITIES IN F&O". Ignored by every other data source.
     nse_index: str = "NIFTY 500"
+    #: Causal cross-sectional relative-strength filter: keep only the top/bottom
+    #: fraction of symbols ranked by prior-session returns (None = disabled).
+    rs_top_pct: Optional[float] = None
+    rs_lookback_sessions: int = 20
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,10 @@ class BacktestConfig:
     #: once the trade is this many R in profit, move the stop to the entry price.
     #: ``None`` (default) never moves it.
     breakeven_at_r: Optional[float] = None
+    #: when True and the signal frame provides a finite ``entry_price``,
+    #: execute entries as passive limit orders (filling only if the next bar
+    #: trades through the limit level, without adverse market-order slippage).
+    use_limit_entries: bool = False
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,12 @@ class DataConfig:
     #: meant it could not be pointed anywhere else, did not exist on a fresh clone,
     #: and was deleted whenever the cache was cleared.
     csv_root: str = "data/live"
+    #: Optional benchmark/index symbol for causal market/ORB regime alignment
+    #: (e.g. "^NSEI" for indian_equities, "SPY" for us_equities).
+    regime_symbol: Optional[str] = None
+    #: Optional ISO date (e.g. "2025-01-01"): exclude bars >= holdout_start
+    #: during research/variant runs so a locked hold-out period stays untouched.
+    holdout_start: Optional[str] = None
 
 
 @dataclass(frozen=True)

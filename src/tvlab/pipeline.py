@@ -118,6 +118,31 @@ def effective_config(cfg: AppConfig, strat: Strategy) -> AppConfig:
     return cfg.merge({f"risk.{k}": v for k, v in overrides.items()})
 
 
+def _slice_holdout(frame: Optional[pd.DataFrame], holdout_start: Optional[str]) -> Optional[pd.DataFrame]:
+    if frame is None or frame.empty or not holdout_start or not isinstance(frame.index, pd.DatetimeIndex):
+        return frame
+    cutoff = pd.Timestamp(holdout_start)
+    if frame.index.tz is not None and cutoff.tzinfo is None:
+        cutoff = cutoff.tz_localize(frame.index.tz)
+    elif frame.index.tz is None and cutoff.tzinfo is not None:
+        cutoff = cutoff.tz_localize(None)
+    return frame[frame.index < cutoff]
+
+
+def _call_signals(
+    strat: Strategy,
+    df: pd.DataFrame,
+    bias: Optional[pd.DataFrame],
+    regime: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    if regime is not None:
+        try:
+            return strat.signals(df, bias, regime=regime)
+        except TypeError:
+            pass
+    return strat.signals(df, bias)
+
+
 def run_symbol(
     cfg: AppConfig,
     symbol: str,
@@ -126,16 +151,41 @@ def run_symbol(
     timeframe: Optional[str] = None,
     n_trials: int = 1,
     source: Optional[str] = None,
+    df: Optional[pd.DataFrame] = None,
+    bias: Optional[pd.DataFrame] = None,
+    regime: Optional[pd.DataFrame] = None,
+    rs_mask: Optional[pd.DataFrame] = None,
 ) -> SymbolStudy:
     """Full single-symbol study."""
     store = store or DataStore(cfg)
     strat = strat or build_strategy(cfg)
     eff = effective_config(cfg, strat)
     timeframe = timeframe or cfg.timeframe.execution
+    holdout = getattr(cfg.data, "holdout_start", None)
 
-    df = store.ohlcv(symbol, timeframe, source=source)
-    bias = store.bias_frame(symbol, source=source)
-    sig = strat.signals(df, bias)
+    df = df if df is not None else store.ohlcv(symbol, timeframe, source=source)
+    df = _slice_holdout(df, holdout)
+    if bias is None:
+        bias = store.bias_frame(symbol, source=source)
+    bias = _slice_holdout(bias, holdout)
+    if regime is None and getattr(cfg.data, "regime_symbol", None):
+        reg_sym = cfg.data.regime_symbol
+        if reg_sym and reg_sym != symbol:
+            try:
+                regime = store.ohlcv(reg_sym, timeframe, source=source)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("regime_symbol %s fetch failed (%s); continuing without regime", reg_sym, exc)
+    regime = _slice_holdout(regime, holdout)
+
+    sig = _call_signals(strat, df, bias, regime=regime)
+    if rs_mask is not None and not rs_mask.empty:
+        aligned_mask = rs_mask.reindex(sig.index).fillna(True)
+        drop_long = (sig["signal"] > 0) & (~aligned_mask["allow_long"].to_numpy(dtype=bool))
+        drop_short = (sig["signal"] < 0) & (~aligned_mask["allow_short"].to_numpy(dtype=bool))
+        drop = drop_long | drop_short
+        if drop.any():
+            sig = sig.copy()
+            sig.loc[drop, "signal"] = 0.0
 
     a = atr(df, int(strat.params.get("atr_period", 14)))
     bt = Backtester(eff)
@@ -272,11 +322,43 @@ def run_study(
     syms = syms[: cfg.universe.max_symbols] if cfg.universe.max_symbols else syms
 
     strat = build_strategy(cfg)
+    holdout = getattr(cfg.data, "holdout_start", None)
+    timeframe = cfg.timeframe.execution
+
+    regime_df: Optional[pd.DataFrame] = None
+    reg_sym = getattr(cfg.data, "regime_symbol", None)
+    if reg_sym:
+        try:
+            regime_df = _slice_holdout(store.ohlcv(reg_sym, timeframe, source=source), holdout)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("regime_symbol %s fetch failed (%s)", reg_sym, exc)
+
+    rs_masks: Dict[str, pd.DataFrame] = {}
+    preloaded: Dict[str, pd.DataFrame] = {}
+    rs_pct = getattr(cfg.universe, "rs_top_pct", None)
+    if rs_pct is not None and 0.0 < float(rs_pct) < 1.0 and len(syms) >= 2:
+        from .portfolio import causal_rs_mask
+
+        for sym in syms:
+            try:
+                preloaded[sym] = _slice_holdout(store.ohlcv(sym, timeframe, source=source), holdout)
+            except Exception:  # noqa: BLE001
+                continue
+        rs_masks = causal_rs_mask(
+            preloaded,
+            lookback_sessions=int(getattr(cfg.universe, "rs_lookback_sessions", 20)),
+            top_pct=float(rs_pct),
+        )
+
     studies: List[SymbolStudy] = []
     for sym in syms:
         try:
-            studies.append(run_symbol(cfg, sym, store=store, strat=strat,
-                                      n_trials=n_trials, source=source))
+            studies.append(run_symbol(
+                cfg, sym, store=store, strat=strat,
+                n_trials=n_trials, source=source,
+                df=preloaded.get(sym), regime=regime_df,
+                rs_mask=rs_masks.get(sym),
+            ))
         except Exception as exc:  # noqa: BLE001 - one bad symbol must not kill the study
             log.warning("%s: study failed (%s: %s)", sym, type(exc).__name__, exc)
 
